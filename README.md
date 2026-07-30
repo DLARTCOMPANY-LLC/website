@@ -80,14 +80,15 @@ when you're ready — a third-party endpoint is required since the site is stati
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) builds and publishes to GitHub
 Pages on every push to `main`.
 
-### One-time setup
+Pages is already enabled on the repo (**Source: GitHub Actions**) and the custom domain is
+already registered with GitHub, so the only outstanding step is DNS.
 
-**1. Enable Pages.** Repo **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+### Remaining setup: point DNS at GitHub
 
-**2. Point DNS at GitHub.** `public/CNAME` pins the custom domain, but the records must be set at
-your registrar (Google Domains has migrated to Squarespace Domains).
+`dlartcompany.com` currently resolves to Squarespace. Update these records at the registrar
+(Google Domains has migrated to Squarespace Domains) to move the domain to GitHub Pages.
 
-Apex `dlartcompany.com` — four `A` records:
+Apex `dlartcompany.com` — replace the existing `A` records with these four:
 
 ```
 185.199.108.153
@@ -96,7 +97,7 @@ Apex `dlartcompany.com` — four `A` records:
 185.199.111.153
 ```
 
-…and four `AAAA` records:
+Optionally add the matching `AAAA` records for IPv6:
 
 ```
 2606:50c0:8000::153
@@ -105,14 +106,20 @@ Apex `dlartcompany.com` — four `A` records:
 2606:50c0:8003::153
 ```
 
-Subdomain `www` — one `CNAME` record:
+Subdomain `www` — repoint the `CNAME` record:
 
 ```
 www  →  safreita.github.io
 ```
 
-**3. Enforce HTTPS.** Once DNS propagates (can take up to 24h), return to **Settings → Pages**,
-confirm the custom domain shows as verified, and tick **Enforce HTTPS**.
+### After DNS propagates
+
+Propagation can take up to 24h. Once it completes, GitHub issues a certificate automatically.
+Then go to **Settings → Pages**, confirm the domain shows as verified, and tick
+**Enforce HTTPS** (it can't be enabled before the certificate exists).
+
+> **Note:** the repo is public because GitHub Pages requires a paid plan to publish from a
+> private repository.
 
 ## Project structure
 
