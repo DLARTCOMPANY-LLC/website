@@ -1,0 +1,65 @@
+---
+import { hero, site } from '../data/content';
+---
+
+<section id="top" class="grain relative flex min-h-svh items-end overflow-hidden">
+  <!-- Atmospheric backdrop: layered radial washes rather than a photograph,
+       so the hero reads as intentional before any real art exists. -->
+  <div
+    aria-hidden="true"
+    class="absolute inset-0 bg-[radial-gradient(120%_90%_at_15%_0%,#1c2233_0%,#0d0f14_55%,#08090c_100%)]"
+  >
+  </div>
+  <div
+    aria-hidden="true"
+    class="absolute -top-40 -right-32 h-[38rem] w-[38rem] rounded-full bg-ember-600/12 blur-[140px]"
+  >
+  </div>
+  <div
+    aria-hidden="true"
+    class="absolute bottom-[-18rem] left-[-12rem] h-[34rem] w-[34rem] rounded-full bg-ink-600/25 blur-[150px]"
+  >
+  </div>
+
+  <div class="relative mx-auto w-full max-w-6xl px-6 pt-32 pb-20 md:px-10 md:pb-28">
+    <p class="text-xs tracking-[0.35em] text-ember-400 uppercase">{hero.eyebrow}</p>
+
+    <h1 class="mt-8 font-display text-hero leading-[0.88] text-ink-50">
+      {
+        hero.headingLines.map((line, index) => (
+          <span
+            class:list={[
+              'block',
+              index === hero.headingLines.length - 1 && 'text-ember-400',
+            ]}
+          >
+            {line}
+          </span>
+        ))
+      }
+    </h1>
+
+    <p class="mt-10 max-w-2xl text-lg leading-relaxed text-ink-200 md:text-xl">
+      {hero.lede}
+    </p>
+
+    <div class="mt-12 flex flex-wrap items-center gap-x-8 gap-y-4">
+      <a
+        href="#games"
+        class="group inline-flex items-center gap-3 text-sm tracking-[0.2em] text-ink-100 uppercase transition-colors hover:text-ember-400"
+      >
+        {hero.scrollCue}
+        <span
+          aria-hidden="true"
+          class="inline-block h-px w-10 bg-ink-600 transition-all group-hover:w-16 group-hover:bg-ember-400"
+        ></span>
+      </a>
+      <a
+        href={`mailto:${site.email}`}
+        class="text-sm tracking-[0.2em] text-ink-400 uppercase transition-colors hover:text-ink-100"
+      >
+        {site.email}
+      </a>
+    </div>
+  </div>
+</section>

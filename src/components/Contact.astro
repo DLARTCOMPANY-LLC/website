@@ -1,0 +1,119 @@
+---
+import Section from './Section.astro';
+import { contact, site, socials } from '../data/content';
+
+const activeSocials = socials.filter((social) => social.href.trim() !== '');
+---
+
+<Section id={contact.id} tone="base">
+  <div class="grid gap-12 lg:grid-cols-12 lg:gap-16">
+    <div class="lg:col-span-7">
+      <p class="text-xs tracking-[0.35em] text-ember-400 uppercase">{contact.eyebrow}</p>
+
+      <h2 class="mt-6 font-display text-section leading-[1.05] text-ink-50">
+        {contact.heading}
+      </h2>
+
+      <p class="mt-8 max-w-2xl text-lg leading-relaxed text-ink-100 md:text-xl">
+        {contact.lede}
+      </p>
+
+      <div class="mt-10 flex flex-wrap items-center gap-6">
+        <a
+          href={`mailto:${site.email}`}
+          class="inline-flex items-center gap-3 rounded-full bg-ember-500 px-7 py-3.5 text-sm font-medium tracking-[0.12em] text-ink-950 uppercase transition-colors hover:bg-ember-400"
+        >
+          {contact.ctaLabel}
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            class="h-4 w-4"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M13 6l6 6-6 6"></path>
+          </svg>
+        </a>
+
+        <a
+          href={`mailto:${site.email}`}
+          class="text-base text-ink-200 underline decoration-ink-600 underline-offset-4 transition-colors hover:text-ember-400 hover:decoration-ember-400"
+        >
+          {site.email}
+        </a>
+      </div>
+    </div>
+
+    <div class="lg:col-span-5 lg:pl-8">
+      {
+        activeSocials.length > 0 && (
+          <>
+            <h3 class="text-xs tracking-[0.35em] text-ink-400 uppercase">Elsewhere</h3>
+            <ul class="mt-6 divide-y divide-ink-800 border-y border-ink-800">
+              {activeSocials.map((social) => (
+                <li>
+                  <a
+                    href={social.href}
+                    rel="me noopener"
+                    class="group flex items-center justify-between py-4 text-base text-ink-100 transition-colors hover:text-ember-400"
+                  >
+                    {social.label}
+                    <span
+                      aria-hidden="true"
+                      class="text-ink-600 transition-transform group-hover:translate-x-1 group-hover:text-ember-400"
+                    >
+                      →
+                    </span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </>
+        )
+      }
+
+      {
+        /*
+          NEWSLETTER PLACEHOLDER
+          ----------------------
+          The site is statically hosted on GitHub Pages, so a signup form needs a
+          third-party endpoint. To enable one:
+
+          1. Create a list with Buttondown, Mailchimp, or Kit.
+          2. Uncomment the markup below and set `action` to the provider's form URL,
+             e.g. https://buttondown.com/api/emails/embed-subscribe/<username>
+          3. Match the input `name` to what the provider expects
+             (Buttondown: "email", Mailchimp: "EMAIL").
+
+          <form
+            action="REPLACE_WITH_PROVIDER_FORM_URL"
+            method="post"
+            target="_blank"
+            class="mt-12"
+          >
+            <label for="newsletter-email" class="text-xs uppercase tracking-[0.35em] text-ink-400">
+              Newsletter
+            </label>
+            <div class="mt-4 flex gap-3">
+              <input
+                id="newsletter-email"
+                type="email"
+                name="email"
+                required
+                placeholder="you@example.com"
+                class="min-w-0 flex-1 rounded-full border border-ink-700 bg-ink-950 px-5 py-3 text-ink-100 placeholder:text-ink-600"
+              />
+              <button
+                type="submit"
+                class="rounded-full bg-ember-500 px-6 py-3 text-sm font-medium uppercase tracking-[0.12em] text-ink-950 transition-colors hover:bg-ember-400"
+              >
+                Join
+              </button>
+            </div>
+          </form>
+        */
+      }
+    </div>
+  </div>
+</Section>

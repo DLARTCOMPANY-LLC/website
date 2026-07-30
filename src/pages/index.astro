@@ -1,0 +1,51 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Nav from '../components/Nav.astro';
+import Hero from '../components/Hero.astro';
+import StatementSection from '../components/StatementSection.astro';
+import Contact from '../components/Contact.astro';
+import Footer from '../components/Footer.astro';
+import { sections, about } from '../data/content';
+
+const variants = ['games', 'books', 'art'] as const;
+---
+
+<BaseLayout>
+  <Nav />
+
+  <main id="main">
+    <Hero />
+
+    {
+      sections.map((section, index) => (
+        <StatementSection
+          id={section.id}
+          eyebrow={section.eyebrow}
+          heading={section.heading}
+          lede={section.lede}
+          body={section.body}
+          notes={section.notes}
+          variant={variants[index] ?? 'art'}
+          tone={index % 2 === 0 ? 'base' : 'raised'}
+          reversed={index % 2 === 1}
+        />
+      ))
+    }
+
+    <StatementSection
+      id={about.id}
+      eyebrow={about.eyebrow}
+      heading={about.heading}
+      lede={about.lede}
+      body={about.body}
+      notes={about.notes}
+      variant="about"
+      tone={sections.length % 2 === 0 ? 'base' : 'raised'}
+      reversed={sections.length % 2 === 1}
+    />
+
+    <Contact />
+  </main>
+
+  <Footer />
+</BaseLayout>

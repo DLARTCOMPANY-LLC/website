@@ -1,0 +1,116 @@
+---
+interface Props {
+  variant: 'games' | 'books' | 'art' | 'about';
+  class?: string;
+}
+
+const { variant, class: className } = Astro.props;
+
+/**
+ * Purely decorative atmospheric panels. Each variant is a distinct arrangement
+ * of gradient washes and line work so the sections feel related but not
+ * repetitive. Swap any of these for a real <Image /> when artwork is ready.
+ */
+const washes: Record<Props['variant'], string> = {
+  games: 'bg-[radial-gradient(90%_80%_at_25%_20%,#233046_0%,#12151c_60%,#0d0f14_100%)]',
+  books: 'bg-[radial-gradient(85%_85%_at_75%_25%,#2a2434_0%,#14151d_60%,#0d0f14_100%)]',
+  art: 'bg-[radial-gradient(90%_80%_at_30%_75%,#3a2a20_0%,#171620_60%,#0d0f14_100%)]',
+  about: 'bg-[radial-gradient(85%_85%_at_50%_15%,#1d2a2c_0%,#12171b_60%,#0d0f14_100%)]',
+};
+---
+
+<div
+  aria-hidden="true"
+  class:list={[
+    'grain relative isolate overflow-hidden rounded-sm border border-ink-800',
+    washes[variant],
+    className,
+  ]}
+>
+  <div class="absolute -top-24 -right-16 h-72 w-72 rounded-full bg-ember-600/12 blur-[90px]"></div>
+  <div class="absolute -bottom-28 -left-20 h-72 w-72 rounded-full bg-ink-600/25 blur-[100px]"></div>
+
+  {
+    variant === 'games' && (
+      <svg viewBox="0 0 400 500" class="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+        <g stroke="#f0a868" stroke-opacity="0.16" fill="none">
+          {Array.from({ length: 9 }).map((_, i) => (
+            <line x1={i * 50} y1="0" x2={i * 50} y2="500" />
+          ))}
+          {Array.from({ length: 11 }).map((_, i) => (
+            <line x1="0" y1={i * 50} x2="400" y2={i * 50} />
+          ))}
+        </g>
+        <g fill="#f0a868" fill-opacity="0.4">
+          <circle cx="150" cy="200" r="5" />
+          <circle cx="250" cy="300" r="5" />
+          <circle cx="100" cy="350" r="5" />
+        </g>
+        <path
+          d="M150 200 L250 300 L100 350"
+          stroke="#f0a868"
+          stroke-opacity="0.35"
+          fill="none"
+          stroke-width="1.5"
+        />
+      </svg>
+    )
+  }
+
+  {
+    variant === 'books' && (
+      <svg viewBox="0 0 400 500" class="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+        {/* Structural diagram: a technical book's shape rather than ruled prose. */}
+        <g stroke="#d6dae3" stroke-opacity="0.16" fill="none" stroke-width="1.5">
+          <rect x="150" y="60" width="100" height="52" rx="2" />
+          <rect x="60" y="220" width="100" height="52" rx="2" />
+          <rect x="240" y="220" width="100" height="52" rx="2" />
+          <rect x="60" y="380" width="100" height="52" rx="2" />
+          <rect x="240" y="380" width="100" height="52" rx="2" />
+        </g>
+        <g stroke="#f0a868" stroke-opacity="0.32" fill="none" stroke-width="1.5">
+          <path d="M200 112 v54 h-90 v54" />
+          <path d="M200 112 v54 h90 v54" />
+          <path d="M110 272 v108" />
+          <path d="M290 272 v108" />
+        </g>
+        <g fill="#f0a868" fill-opacity="0.45">
+          <circle cx="200" cy="112" r="3.5" />
+          <circle cx="110" cy="220" r="3.5" />
+          <circle cx="290" cy="220" r="3.5" />
+        </g>
+      </svg>
+    )
+  }
+
+  {
+    variant === 'art' && (
+      <svg viewBox="0 0 400 500" class="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+        <g fill="none" stroke="#f0a868" stroke-opacity="0.22">
+          {Array.from({ length: 7 }).map((_, i) => (
+            <circle cx="200" cy="250" r={40 + i * 32} />
+          ))}
+        </g>
+        <path
+          d="M40 420 C 130 300, 190 380, 250 260 S 340 150, 380 90"
+          fill="none"
+          stroke="#d6dae3"
+          stroke-opacity="0.2"
+          stroke-width="1.5"
+        />
+      </svg>
+    )
+  }
+
+  {
+    variant === 'about' && (
+      <svg viewBox="0 0 400 500" class="absolute inset-0 h-full w-full" preserveAspectRatio="none">
+        <g fill="none" stroke="#f0a868" stroke-opacity="0.24" stroke-width="1.5">
+          <circle cx="200" cy="180" r="95" />
+          <circle cx="140" cy="300" r="95" />
+          <circle cx="260" cy="300" r="95" />
+        </g>
+      </svg>
+    )
+  }
+</div>

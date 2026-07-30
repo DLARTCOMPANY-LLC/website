@@ -1,0 +1,37 @@
+---
+import { site, navItems } from '../data/content';
+
+const year = new Date().getFullYear();
+---
+
+<footer class="border-t border-ink-800/70 bg-ink-950 px-6 py-12 md:px-10">
+  <div
+    class="mx-auto flex max-w-6xl flex-col gap-8 md:flex-row md:items-center md:justify-between"
+  >
+    <div>
+      <a
+        href="#top"
+        class="font-display text-base tracking-[0.2em] text-ink-100 uppercase transition-colors hover:text-ember-400"
+      >
+        {site.name}
+      </a>
+      <p class="mt-2 text-sm text-ink-400">
+        © {year} {site.legalName}. All rights reserved.
+      </p>
+    </div>
+
+    <nav aria-label="Footer">
+      <ul class="flex flex-wrap gap-x-6 gap-y-2 text-sm text-ink-400">
+        {
+          navItems.map((item) => (
+            <li>
+              <a href={`#${item.id}`} class="transition-colors hover:text-ink-100">
+                {item.navLabel}
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </nav>
+  </div>
+</footer>

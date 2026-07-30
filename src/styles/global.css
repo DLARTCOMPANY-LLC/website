@@ -1,0 +1,80 @@
+@import 'tailwindcss';
+
+@theme {
+  /* Dark, moody palette: deep ink base with a warm ember accent. */
+  --color-ink-950: #08090c;
+  --color-ink-900: #0d0f14;
+  --color-ink-850: #12151c;
+  --color-ink-800: #191d26;
+  --color-ink-700: #232833;
+  --color-ink-600: #363d4b;
+  --color-ink-400: #6b7486;
+  --color-ink-200: #a8b0c0;
+  --color-ink-100: #d6dae3;
+  --color-ink-50: #f2f4f8;
+
+  --color-ember-400: #f0a868;
+  --color-ember-500: #e08b3d;
+  --color-ember-600: #c06d22;
+
+  --font-display: 'Bodoni Moda', ui-serif, Georgia, serif;
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+
+  --text-hero: clamp(2.75rem, 9vw, 7rem);
+  --text-section: clamp(2rem, 5vw, 3.75rem);
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    /* Offset anchor targets so the sticky nav doesn't cover section headings. */
+    scroll-padding-top: 5rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+
+  body {
+    background-color: var(--color-ink-950);
+    color: var(--color-ink-100);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background-color: var(--color-ember-500);
+    color: var(--color-ink-950);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-ember-400);
+    outline-offset: 3px;
+  }
+}
+
+@utility grain {
+  /* Subtle film grain to keep large dark fields from banding. */
+  position: relative;
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.2;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  }
+}

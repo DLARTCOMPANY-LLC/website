@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://dlartcompany.com/sitemap-index.xml

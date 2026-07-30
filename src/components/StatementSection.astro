@@ -1,0 +1,53 @@
+---
+import Section from './Section.astro';
+import Motif from './Motif.astro';
+
+interface Props {
+  id: string;
+  eyebrow: string;
+  heading: string;
+  lede: string;
+  body: readonly string[];
+  notes: readonly string[];
+  variant: 'games' | 'books' | 'art' | 'about';
+  tone?: 'base' | 'raised';
+  /** Places the motif on the left at desktop widths. */
+  reversed?: boolean;
+}
+
+const { id, eyebrow, heading, lede, body, notes, variant, tone, reversed = false } = Astro.props;
+---
+
+<Section id={id} tone={tone}>
+  <div class="grid items-center gap-12 lg:grid-cols-12 lg:gap-16">
+    <div class:list={['lg:col-span-7', reversed && 'lg:order-2']}>
+      <p class="text-xs tracking-[0.35em] text-ember-400 uppercase">{eyebrow}</p>
+
+      <h2 class="mt-6 font-display text-section leading-[1.05] text-ink-50">
+        {heading}
+      </h2>
+
+      <p class="mt-8 max-w-2xl text-lg leading-relaxed text-ink-100 md:text-xl">
+        {lede}
+      </p>
+
+      <div class="mt-6 max-w-2xl space-y-5 text-base leading-relaxed text-ink-200">
+        {body.map((paragraph) => <p>{paragraph}</p>)}
+      </div>
+
+      <ul class="mt-10 flex flex-wrap gap-x-3 gap-y-3">
+        {
+          notes.map((note) => (
+            <li class="rounded-full border border-ink-700 px-4 py-1.5 text-xs tracking-[0.14em] text-ink-200 uppercase">
+              {note}
+            </li>
+          ))
+        }
+      </ul>
+    </div>
+
+    <div class:list={['lg:col-span-5', reversed && 'lg:order-1']}>
+      <Motif variant={variant} class="aspect-[4/5] w-full" />
+    </div>
+  </div>
+</Section>

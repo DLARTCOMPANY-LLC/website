@@ -1,0 +1,123 @@
+---
+import { site, navItems } from '../data/content';
+---
+
+<header
+  id="site-nav"
+  class="fixed inset-x-0 top-0 z-40 border-b border-transparent transition-colors duration-300"
+  data-nav
+>
+  <div class="mx-auto flex max-w-6xl items-center justify-between px-6 py-4 md:px-10">
+    <a
+      href="#top"
+      class="font-display text-lg tracking-[0.2em] text-ink-50 uppercase transition-colors hover:text-ember-400"
+    >
+      {site.name}
+    </a>
+
+    <nav aria-label="Primary" class="hidden md:block">
+      <ul class="flex items-center gap-8 text-sm tracking-wide text-ink-200">
+        {
+          navItems.map((item) => (
+            <li>
+              <a
+                href={`#${item.id}`}
+                class="relative py-1 transition-colors hover:text-ink-50 after:absolute after:inset-x-0 after:-bottom-0.5 after:h-px after:origin-left after:scale-x-0 after:bg-ember-400 after:transition-transform hover:after:scale-x-100"
+              >
+                {item.navLabel}
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+    </nav>
+
+    <button
+      type="button"
+      data-menu-toggle
+      aria-expanded="false"
+      aria-controls="mobile-menu"
+      class="flex h-10 w-10 items-center justify-center rounded-full border border-ink-700 text-ink-100 transition-colors hover:border-ember-500 hover:text-ember-400 md:hidden"
+    >
+      <span class="sr-only">Toggle menu</span>
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.5"
+        class="h-5 w-5"
+      >
+        <path data-icon-open stroke-linecap="round" d="M4 7h16M4 12h16M4 17h16"></path>
+        <path data-icon-close class="hidden" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"></path>
+      </svg>
+    </button>
+  </div>
+
+  <nav
+    id="mobile-menu"
+    aria-label="Primary mobile"
+    class="hidden border-t border-ink-800 bg-ink-950/95 backdrop-blur md:hidden"
+    data-mobile-menu
+  >
+    <ul class="mx-auto flex max-w-6xl flex-col px-6 py-2">
+      {
+        navItems.map((item) => (
+          <li>
+            <a
+              href={`#${item.id}`}
+              class="block border-b border-ink-800/70 py-4 text-base tracking-wide text-ink-200 transition-colors hover:text-ember-400"
+            >
+              {item.navLabel}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+  </nav>
+</header>
+
+<script>
+  const header = document.querySelector<HTMLElement>('[data-nav]');
+  const toggle = document.querySelector<HTMLButtonElement>('[data-menu-toggle]');
+  const menu = document.querySelector<HTMLElement>('[data-mobile-menu]');
+  const iconOpen = document.querySelector<SVGPathElement>('[data-icon-open]');
+  const iconClose = document.querySelector<SVGPathElement>('[data-icon-close]');
+
+  const solidClasses = ['bg-ink-950/85', 'backdrop-blur', 'border-ink-800'];
+
+  const syncHeaderBackground = () => {
+    if (!header) return;
+    const scrolled = window.scrollY > 24;
+    header.classList.toggle('border-transparent', !scrolled);
+    solidClasses.forEach((cls) => header.classList.toggle(cls, scrolled));
+  };
+
+  const setMenuOpen = (open: boolean) => {
+    if (!menu || !toggle) return;
+    menu.classList.toggle('hidden', !open);
+    toggle.setAttribute('aria-expanded', String(open));
+    iconOpen?.classList.toggle('hidden', open);
+    iconClose?.classList.toggle('hidden', !open);
+  };
+
+  syncHeaderBackground();
+  window.addEventListener('scroll', syncHeaderBackground, { passive: true });
+
+  toggle?.addEventListener('click', () => {
+    setMenuOpen(toggle.getAttribute('aria-expanded') !== 'true');
+  });
+
+  menu?.querySelectorAll('a').forEach((link) => {
+    link.addEventListener('click', () => setMenuOpen(false));
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') setMenuOpen(false);
+  });
+
+  // A resize past the breakpoint should never leave the menu stuck open.
+  window.matchMedia('(min-width: 768px)').addEventListener('change', (event) => {
+    if (event.matches) setMenuOpen(false);
+  });
+</script>
