@@ -28,7 +28,7 @@ export const site = {
   name: 'DLARTCOMPANY',
   legalName: 'DLARTCOMPANY LLC',
   domain: 'dlartcompany.com',
-  url: 'https://dlartcompany.com',
+  url: 'https://www.dlartcompany.com',
   tagline: 'An independent studio making games, books, and art.',
   description:
     'DLARTCOMPANY LLC is an independent creative studio working across game design, technical writing, and visual art.',

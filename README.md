@@ -80,15 +80,15 @@ when you're ready — a third-party endpoint is required since the site is stati
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) builds and publishes to GitHub
 Pages on every push to `main`.
 
-Pages is already enabled on the repo (**Source: GitHub Actions**) and the custom domain is
-already registered with GitHub, so the only outstanding step is DNS.
+Pages is enabled on the repo (**Source: GitHub Actions**), the custom domain is configured,
+and HTTPS is live. The site is served at `https://www.dlartcompany.com`; the apex
+`dlartcompany.com` issues a 301 redirect to it.
 
-### Remaining setup: point DNS at GitHub
+### DNS records
 
-`dlartcompany.com` currently resolves to Squarespace. Update these records at the registrar
-(Google Domains has migrated to Squarespace Domains) to move the domain to GitHub Pages.
+These are set at Squarespace Domains (Google Domains migrated there in 2023).
 
-Apex `dlartcompany.com` — replace the existing `A` records with these four:
+Apex `dlartcompany.com` — four `A` records:
 
 ```
 185.199.108.153
@@ -97,7 +97,7 @@ Apex `dlartcompany.com` — replace the existing `A` records with these four:
 185.199.111.153
 ```
 
-Optionally add the matching `AAAA` records for IPv6:
+Apex `dlartcompany.com` — four `AAAA` records for IPv6:
 
 ```
 2606:50c0:8000::153
@@ -106,17 +106,19 @@ Optionally add the matching `AAAA` records for IPv6:
 2606:50c0:8003::153
 ```
 
-Subdomain `www` — repoint the `CNAME` record:
+Subdomain `www` — `CNAME` record:
 
 ```
-www  →  safreita.github.io
+www  ->  safreita.github.io
 ```
 
-### After DNS propagates
+The Google Workspace `MX` records must be left untouched; they carry email for the domain
+and are independent of web hosting.
 
-Propagation can take up to 24h. Once it completes, GitHub issues a certificate automatically.
-Then go to **Settings → Pages**, confirm the domain shows as verified, and tick
-**Enforce HTTPS** (it can't be enabled before the certificate exists).
+> **Important:** `public/CNAME` must always match the custom domain configured in
+> **Settings → Pages**. If they disagree, each deploy overwrites the Pages setting, which
+> breaks the custom domain and can force the TLS certificate to be reissued. Both are
+> currently `www.dlartcompany.com`.
 
 > **Note:** the repo is public because GitHub Pages requires a paid plan to publish from a
 > private repository.
