@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertLiveEvaluationAuthorized,
+  readLiveEvaluationRuns,
   scoreFixture,
   thresholdFailures,
 } from "./live-eval-lib.mjs";
@@ -132,5 +133,16 @@ describe("live OCR evaluator scoring", () => {
         OCR_EVAL_TARGET: "http://127.0.0.1:8787/v1/screenplays/import",
       }),
     ).toBe("http://127.0.0.1:8787/v1/screenplays/import");
+  });
+
+  it("bounds repeated evaluation runs", () => {
+    expect(readLiveEvaluationRuns({})).toBe(1);
+    expect(readLiveEvaluationRuns({ OCR_EVAL_RUNS: "3" })).toBe(3);
+    expect(() => readLiveEvaluationRuns({ OCR_EVAL_RUNS: "0" })).toThrow(
+      "integer from 1 to 5",
+    );
+    expect(() => readLiveEvaluationRuns({ OCR_EVAL_RUNS: "6" })).toThrow(
+      "integer from 1 to 5",
+    );
   });
 });

@@ -132,7 +132,9 @@ expected output, excluded UI/annotations, permitted normalization, and quality t
 `npm run api:fixtures:test` is deterministic and runs without OpenAI. `npm run api:eval:live` is a
 separate billable evaluator that refuses to start unless `RUN_LIVE_OCR_EVAL=1`, `OPENAI_API_KEY`, and
 an explicit `OCR_EVAL_TARGET` are present. The key serves only as billing acknowledgement and is never
-transmitted or printed by the runner. See `api/test/fixtures/ocr/README.md` for metrics and usage.
+transmitted or printed by the runner. Set `OCR_EVAL_RUNS` to 1–5 to require every paced repeated run
+to meet the manifest thresholds, catching provider variance. See `api/test/fixtures/ocr/README.md`
+for metrics and usage.
 
 Local setup:
 

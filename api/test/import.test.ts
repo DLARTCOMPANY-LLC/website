@@ -433,6 +433,74 @@ describe("POST screenplay import", () => {
     ]);
   });
 
+  it("filters repeated revision glyph-only items without changing inline asterisks", async () => {
+    const revisionMarksImport = {
+      ...waiterImport,
+      characters: ["SPENCER"],
+      items: [
+        {
+          order: 1,
+          speaker: null,
+          text: "***",
+          isStageDirection: true,
+          isArtifact: false,
+          confidence: 0.9,
+        },
+        {
+          order: 2,
+          speaker: null,
+          text: "* * *",
+          isStageDirection: true,
+          isArtifact: false,
+          confidence: 0.9,
+        },
+        {
+          order: 3,
+          speaker: null,
+          text: "A signal * flickers.",
+          isStageDirection: true,
+          isArtifact: false,
+          confidence: 0.99,
+        },
+        {
+          ...waiterImport.items[2],
+          order: 4,
+          speaker: "SPENCER",
+          text: "Keep * inside this spoken line.",
+        },
+      ],
+    };
+
+    const response = await handleRequest(
+      createRequest(),
+      env,
+      dependencies(vi.fn(async () => openAiResponse(revisionMarksImport))),
+    );
+    const result = (await response.json()) as {
+      characters: string[];
+      items: Array<{ speaker: string | null; text: string; isStageDirection: boolean }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(result.characters).toEqual(["Spencer"]);
+    expect(result.items).toEqual([
+      {
+        order: 1,
+        speaker: null,
+        text: "A signal * flickers.",
+        isStageDirection: true,
+        confidence: 0.99,
+      },
+      {
+        order: 2,
+        speaker: "Spencer",
+        text: "Keep * inside this spoken line.",
+        isStageDirection: false,
+        confidence: 0.99,
+      },
+    ]);
+  });
+
   it("derives canonical display names from mixed-case spoken cues", async () => {
     const mixedCase = {
       ...waiterImport,

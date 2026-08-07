@@ -44,11 +44,13 @@ values are explicitly provided:
 $env:RUN_LIVE_OCR_EVAL = "1"
 $env:OPENAI_API_KEY = "<present only as explicit billing acknowledgement>"
 $env:OCR_EVAL_TARGET = "https://dlartcompany-screenplay-api.dlartcompany.workers.dev/v1/screenplays/import"
+$env:OCR_EVAL_RUNS = "3" # Optional, 1–5; every run must pass.
 npm run api:eval:live
 ```
 
 The runner never sends or prints `OPENAI_API_KEY`; the configured Worker owns provider authentication.
 It runs cases sequentially and reports only case IDs and metrics: field, character, speaker, dialogue
 and direction accuracy; dialogue omissions; artifact false positives; confidence; and latency. Any
-manifest threshold failure exits nonzero. Point `OCR_EVAL_TARGET` at a local Worker URL to avoid
+manifest threshold failure in any repeated run exits nonzero. Repeated runs are paced to stay within
+the default durable per-IP budget. Point `OCR_EVAL_TARGET` at a local Worker URL to avoid
 production traffic, but OpenAI usage may still be billable if that Worker has provider credentials.

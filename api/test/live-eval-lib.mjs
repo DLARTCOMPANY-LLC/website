@@ -22,6 +22,18 @@ export function assertLiveEvaluationAuthorized(environment) {
   return url.toString();
 }
 
+export function readLiveEvaluationRuns(environment) {
+  const raw = environment.OCR_EVAL_RUNS?.trim() || "1";
+  if (!/^\d+$/.test(raw)) {
+    throw new Error("OCR_EVAL_RUNS must be an integer from 1 to 5.");
+  }
+  const runs = Number(raw);
+  if (runs < 1 || runs > 5) {
+    throw new Error("OCR_EVAL_RUNS must be an integer from 1 to 5.");
+  }
+  return runs;
+}
+
 export function scoreFixture(manifest, actual, latencyMs) {
   const expectedItems = manifest.expected.items;
   const actualItems = Array.isArray(actual.items) ? actual.items : [];

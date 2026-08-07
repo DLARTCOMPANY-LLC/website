@@ -279,7 +279,7 @@ function removeMergedAuditionUi(value: string): string {
     .replace(/^[ \t]*Role:[^\r\n]*(?:\r?\n)+/i, "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+\s*\d*(?:START|END)\s*$/i, "")
     .replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, "");
-  return /^[*✱]$/.test(cleaned.trim()) ? "" : cleaned;
+  return /^(?:[*✱]\s*)+$/.test(cleaned.trim()) ? "" : cleaned;
 }
 
 function splitDialogueParentheticals(
