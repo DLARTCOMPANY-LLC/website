@@ -767,6 +767,81 @@ describe("POST screenplay import", () => {
     ]);
   });
 
+  it("uploads bounded PDFs as transient OpenAI file inputs and deletes them", async () => {
+    const calls: string[] = [];
+    const openAiFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(`${init?.method}:${url}`);
+      if (url.endsWith("/v1/files") && init?.method === "POST") {
+        const form = init.body as FormData;
+        expect(form.get("purpose")).toBe("user_data");
+        expect(form.get("expires_after[seconds]")).toBe("3600");
+        const file = form.get("file");
+        expect(file).toBeInstanceOf(File);
+        expect((file as File).type).toBe("application/pdf");
+        return Response.json({ id: "file-pdf123" });
+      }
+      if (url.endsWith("/v1/responses")) {
+        const providerRequest = JSON.parse(String(init?.body));
+        expect(providerRequest.store).toBe(false);
+        expect(providerRequest.input[0].content).toEqual([
+          {
+            type: "input_text",
+            text: "Transcribe the screenplay content in this PDF according to the production extraction instructions.",
+          },
+          {
+            type: "input_file",
+            file_id: "file-pdf123",
+            detail: "high",
+          },
+        ]);
+        return openAiResponse(waiterImport);
+      }
+      if (url.endsWith("/v1/files/file-pdf123") && init?.method === "DELETE") {
+        return Response.json({ id: "file-pdf123", deleted: true });
+      }
+      return new Response(null, { status: 500 });
+    });
+    const form = new FormData();
+    form.set(
+      "file",
+      new File([createPdf(2)], "scene.pdf", { type: "application/pdf" }),
+    );
+    form.set("title", "PDF scene");
+
+    const response = await handleRequest(
+      multipartRequest(form),
+      env,
+      dependencies(openAiFetch),
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([
+      "POST:https://api.openai.com/v1/files",
+      "POST:https://api.openai.com/v1/responses",
+      "DELETE:https://api.openai.com/v1/files/file-pdf123",
+    ]);
+  });
+
+  it("rejects malformed PDF bytes before calling OpenAI", async () => {
+    const openAiFetch = vi.fn();
+    for (const [pdf, code, status] of [
+      [new TextEncoder().encode("not a pdf"), "invalid_pdf", 415],
+      [new TextEncoder().encode("%PDF-1.7\nmissing trailer"), "invalid_pdf", 415],
+    ] as const) {
+      const form = new FormData();
+      form.set("file", new File([pdf], "scene.pdf", { type: "application/pdf" }));
+      const response = await handleRequest(
+        multipartRequest(form),
+        env,
+        dependencies(openAiFetch),
+      );
+      expect(response.status).toBe(status);
+      await expect(response.json()).resolves.toMatchObject({ error: { code } });
+    }
+    expect(openAiFetch).not.toHaveBeenCalled();
+  });
+
   it("redacts secrets and does not expose arbitrary provider messages publicly", async () => {
     const logger = vi.fn();
     const response = await handleRequest(createRequest(), env, {
@@ -948,6 +1023,288 @@ describe("POST screenplay import", () => {
   });
 });
 
+describe("POST OpenAI speech", () => {
+  it("returns bounded AAC audio with model, voice, privacy, and CORS headers", async () => {
+    const audio = Uint8Array.from([0xff, 0xf1, 0x50, 0x80, 0x01, 0x7f]);
+    const openAiFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://api.openai.com/v1/audio/speech");
+      expect(init?.method).toBe("POST");
+      expect(new Headers(init?.headers).get("accept")).toBe("application/octet-stream");
+      const providerRequest = JSON.parse(String(init?.body));
+      expect(providerRequest).toEqual({
+        model: "gpt-4o-mini-tts",
+        input: "Privacy-safe rehearsal line.",
+        voice: "marin",
+        response_format: "aac",
+        stream_format: "audio",
+        instructions:
+          "Speak exactly the provided dialogue without adding, omitting, or paraphrasing words. Use a natural, clear performance suitable for actor rehearsal.",
+      });
+      return new Response(audio, {
+        status: 200,
+        headers: { "Content-Type": "audio/aac" },
+      });
+    });
+
+    const response = await handleRequest(
+      speechRequest(
+        { text: "Privacy-safe rehearsal line.", voice: "marin" },
+        "https://app.example.com",
+      ),
+      {
+        ...env,
+        OPENAI_SPEECH_MODEL: "gpt-4o-mini-tts",
+        CORS_ALLOWED_ORIGINS: "https://app.example.com",
+      },
+      dependencies(openAiFetch),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("audio/aac");
+    expect(response.headers.get("cache-control")).toBe("no-store, private");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("x-speech-model")).toBe("gpt-4o-mini-tts");
+    expect(response.headers.get("x-speech-voice")).toBe("marin");
+    expect(response.headers.get("x-request-id")).toBeTruthy();
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "https://app.example.com",
+    );
+    expect(
+      response.headers.get("access-control-expose-headers"),
+    ).toContain("X-Speech-Model");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(audio);
+  });
+
+  it.each([
+    [{ text: "", voice: "marin" }, 400, "invalid_text"],
+    [{ text: " padded ", voice: "marin" }, 400, "invalid_text"],
+    [{ text: "line\u0000break", voice: "marin" }, 400, "invalid_text"],
+    [{ text: "Line.", voice: "unknown" }, 400, "invalid_voice"],
+    [{ text: "a".repeat(2_001), voice: "marin" }, 413, "text_too_long"],
+    [{ text: "Line.", voice: "marin", speed: 2 }, 400, "unexpected_field"],
+  ])("rejects invalid speech request %# without provider access", async (body, status, code) => {
+    const openAiFetch = vi.fn();
+    const response = await handleRequest(
+      speechRequest(body),
+      env,
+      dependencies(openAiFetch),
+    );
+
+    expect(response.status).toBe(status);
+    await expect(response.json()).resolves.toMatchObject({ error: { code } });
+    expect(openAiFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed JSON, wrong content type, and unsupported model configuration", async () => {
+    const openAiFetch = vi.fn();
+    const malformed = new Request("https://api.example.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "CF-Connecting-IP": "203.0.113.10",
+        "Content-Type": "application/json",
+      },
+      body: "{",
+    });
+    const wrongType = new Request("https://api.example.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "CF-Connecting-IP": "203.0.113.10",
+        "Content-Type": "text/plain",
+      },
+      body: "{}",
+    });
+
+    await expect(
+      (await handleRequest(malformed, env, dependencies(openAiFetch))).json(),
+    ).resolves.toMatchObject({ error: { code: "invalid_json" } });
+    const invalidUtf8 = new Request("https://api.example.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "CF-Connecting-IP": "203.0.113.10",
+        "Content-Type": "application/json",
+      },
+      body: Uint8Array.from([
+        ...new TextEncoder().encode('{"text":"'),
+        0xc3,
+        0x28,
+        ...new TextEncoder().encode('","voice":"marin"}'),
+      ]),
+    });
+    await expect(
+      (await handleRequest(invalidUtf8, env, dependencies(openAiFetch))).json(),
+    ).resolves.toMatchObject({ error: { code: "invalid_json" } });
+    expect(
+      (await handleRequest(wrongType, env, dependencies(openAiFetch))).status,
+    ).toBe(415);
+    const unsupportedModel = await handleRequest(
+      speechRequest({ text: "Line.", voice: "marin" }),
+      { ...env, OPENAI_SPEECH_MODEL: "not-a-speech-model" },
+      dependencies(openAiFetch),
+    );
+    expect(unsupportedModel.status).toBe(503);
+    await expect(unsupportedModel.json()).resolves.toMatchObject({
+      error: { code: "service_not_configured" },
+    });
+    const unsupportedLegacyVoice = await handleRequest(
+      speechRequest({ text: "Line.", voice: "marin" }),
+      { ...env, OPENAI_SPEECH_MODEL: "tts-1" },
+      dependencies(openAiFetch),
+    );
+    expect(unsupportedLegacyVoice.status).toBe(400);
+    await expect(unsupportedLegacyVoice.json()).resolves.toMatchObject({
+      error: { code: "invalid_voice" },
+    });
+    expect(openAiFetch).not.toHaveBeenCalled();
+  });
+
+  it("uses the durable rate limit and fails closed before speech generation", async () => {
+    const openAiFetch = vi.fn();
+    const response = await handleRequest(
+      speechRequest({ text: "Line.", voice: "cedar" }),
+      env,
+      {
+        ...dependencies(openAiFetch),
+        takeRateLimit: async () => ({ allowed: false, retryAfterSeconds: 17 }),
+      },
+    );
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("17");
+    expect(openAiFetch).not.toHaveBeenCalled();
+
+    const unavailable = await handleRequest(
+      speechRequest({ text: "Line.", voice: "cedar" }),
+      env,
+      { fetch: openAiFetch as typeof fetch },
+    );
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toMatchObject({
+      error: { code: "rate_limit_unavailable" },
+    });
+  });
+
+  it("maps provider authentication errors without exposing response content", async () => {
+    const logger = vi.fn();
+    const response = await handleRequest(
+      speechRequest({ text: "Line.", voice: "coral" }),
+      env,
+      {
+        ...dependencies(
+          vi.fn(async () =>
+            Response.json(
+              {
+                error: {
+                  type: "authentication_error",
+                  code: "invalid_api_key",
+                  message: "Secret provider detail",
+                },
+              },
+              {
+                status: 401,
+                headers: { "x-request-id": "req-speech-auth" },
+              },
+            ),
+          ),
+        ),
+        logProviderError: logger,
+      },
+    );
+
+    expect(response.status).toBe(502);
+    const publicBody = JSON.stringify(await response.json());
+    expect(publicBody).toContain("provider_auth_error");
+    expect(publicBody).not.toContain("Secret provider detail");
+    const [, error] = logger.mock.calls[0] as [string, OpenAiError];
+    expect(error.provider).toMatchObject({
+      operation: "speech",
+      status: 401,
+      requestId: "req-speech-auth",
+      type: "authentication_error",
+      code: "invalid_api_key",
+    });
+  });
+
+  it("times out speech generation deterministically", async () => {
+    vi.useFakeTimers();
+    try {
+      const openAiFetch = vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("Request aborted", "AbortError"));
+            });
+          }),
+      );
+      const responsePromise = handleRequest(
+        speechRequest({ text: "Line.", voice: "coral" }),
+        { ...env, OPENAI_SPEECH_TIMEOUT_MS: "5000" },
+        dependencies(openAiFetch),
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const response = await responsePromise;
+      expect(response.status).toBe(504);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "upstream_timeout" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a timeout when a provider error body stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const openAiFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = new ReadableStream({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => {
+              controller.error(new DOMException("Request aborted", "AbortError"));
+            });
+          },
+        });
+        return new Response(body, { status: 500 });
+      });
+      const responsePromise = handleRequest(
+        speechRequest({ text: "Line.", voice: "coral" }),
+        { ...env, OPENAI_SPEECH_TIMEOUT_MS: "5000" },
+        dependencies(openAiFetch),
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const response = await responsePromise;
+      expect(response.status).toBe(504);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "upstream_timeout" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects oversized or non-audio provider responses", async () => {
+    for (const providerResponse of [
+      new Response(Uint8Array.from([1]), {
+        headers: {
+          "Content-Type": "audio/aac",
+          "Content-Length": String(8 * 1024 * 1024 + 1),
+        },
+      }),
+      Response.json({ unexpected: true }),
+    ]) {
+      const response = await handleRequest(
+        speechRequest({ text: "Line.", voice: "alloy" }),
+        env,
+        dependencies(vi.fn(async () => providerResponse)),
+      );
+      expect(response.status).toBe(502);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "upstream_error" },
+      });
+    }
+  });
+});
+
 describe("OpenAI key candidate validation", () => {
   it("accepts evolving printable punctuation after the sk- prefix", () => {
     expect(
@@ -988,6 +1345,19 @@ function multipartRequest(form: FormData, origin?: string): Request {
   });
 }
 
+function speechRequest(body: unknown, origin?: string): Request {
+  const headers = new Headers({
+    "CF-Connecting-IP": "203.0.113.10",
+    "Content-Type": "application/json",
+  });
+  if (origin) headers.set("Origin", origin);
+  return new Request("https://api.example.com/v1/audio/speech", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
 function dependencies(openAiFetch: ReturnType<typeof vi.fn>) {
   return {
     fetch: openAiFetch as typeof fetch,
@@ -1020,4 +1390,31 @@ function createLargePng(): Uint8Array<ArrayBuffer> {
   result.set(chunk, prefix.length);
   result.set(iend, prefix.length + chunk.length);
   return result;
+}
+
+function createPdf(
+  pageCount: number,
+  extra = "",
+): Uint8Array<ArrayBuffer> {
+  const pages = Array.from(
+    { length: pageCount },
+    (_, index) => `${index + 3} 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj`,
+  ).join("\n");
+  return new TextEncoder().encode(
+    `%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count ${pageCount} /Kids [] >>
+endobj
+${pages}
+${extra}
+trailer
+<< /Root 1 0 R >>
+startxref
+0
+%%EOF
+`,
+  );
 }

@@ -11,22 +11,67 @@ import type {
 } from "@cloudflare/workers-types";
 
 const MAX_REQUEST_BYTES = 10 * 1024 * 1024;
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_TITLE_LENGTH = 200;
 const MAX_IMAGE_DIMENSION = 20_000;
 const MAX_IMAGE_PIXELS = 40_000_000;
+const MAX_SPEECH_REQUEST_BYTES = 16 * 1024;
+const MAX_SPEECH_TEXT_CHARACTERS = 2_000;
+const MAX_SPEECH_TEXT_BYTES = 8 * 1024;
+const MAX_SPEECH_AUDIO_BYTES = 8 * 1024 * 1024;
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
 const RATE_LIMITER_INSTANCE = "screenplay-import-global-v1";
 const RATE_LIMITER_URL = "https://rate-limiter.internal/check";
 const MAX_PROVIDER_ERROR_BYTES = 64 * 1024;
 const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
 const OPENAI_FILES_URL = "https://api.openai.com/v1/files";
 const FILE_EXPIRATION_SECONDS = 3_600;
+const DEFAULT_SPEECH_MODEL = "gpt-4o-mini-tts";
+const SPEECH_RESPONSE_FORMAT = "aac";
+const SPEECH_CONTENT_TYPE = "audio/aac";
+const SPEECH_INSTRUCTIONS =
+  "Speak exactly the provided dialogue without adding, omitting, or paraphrasing words. Use a natural, clear performance suitable for actor rehearsal.";
+
+export const OPENAI_SPEECH_VOICES = [
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "fable",
+  "nova",
+  "onyx",
+  "sage",
+  "shimmer",
+  "verse",
+  "marin",
+  "cedar",
+] as const;
+
+const OPENAI_SPEECH_MODELS = new Set([
+  "gpt-4o-mini-tts",
+  "gpt-4o-mini-tts-2025-12-15",
+  "tts-1",
+  "tts-1-hd",
+]);
+const LEGACY_SPEECH_VOICES = new Set([
+  "alloy",
+  "ash",
+  "coral",
+  "echo",
+  "fable",
+  "onyx",
+  "nova",
+  "sage",
+  "shimmer",
+]);
 
 export interface Env {
   OPENAI_API_KEY?: string;
   RATE_LIMITER?: DurableObjectNamespace;
   OPENAI_VISION_MODEL?: string;
+  OPENAI_SPEECH_MODEL?: string;
   CORS_ALLOWED_ORIGINS?: string;
   RATE_LIMIT_REQUESTS?: string;
   GLOBAL_RATE_LIMIT_REQUESTS?: string;
@@ -34,6 +79,7 @@ export interface Env {
   MAX_CONCURRENT_REQUESTS?: string;
   OPENAI_TIMEOUT_MS?: string;
   OPENAI_MAX_OUTPUT_TOKENS?: string;
+  OPENAI_SPEECH_TIMEOUT_MS?: string;
 }
 
 interface HandlerDependencies {
@@ -71,13 +117,19 @@ export async function handleRequest(
   const requestId = crypto.randomUUID();
   const cors = resolveCors(request, env);
   const pathname = new URL(request.url).pathname.replace(/\/+$/, "");
+  const route =
+    pathname === "/v1/screenplays/import"
+      ? "screenplay_import"
+      : pathname === "/v1/audio/speech"
+        ? "speech"
+        : null;
 
   if (request.method === "OPTIONS") {
     return cors.allowed
       ? new Response(null, { status: 204, headers: cors.headers })
       : errorResponse(403, "origin_not_allowed", "Origin is not allowed", requestId);
   }
-  if (pathname !== "/v1/screenplays/import") {
+  if (!route) {
     return withCors(
       errorResponse(404, "not_found", "Endpoint not found", requestId),
       cors,
@@ -96,18 +148,24 @@ export async function handleRequest(
   }
   if (!env.OPENAI_API_KEY?.trim()) {
     return withCors(
-      errorResponse(503, "service_not_configured", "Screenplay import is not configured", requestId),
+      errorResponse(503, "service_not_configured", "OpenAI service is not configured", requestId),
       cors,
     );
   }
 
   const contentType = request.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
+  const validContentType =
+    route === "screenplay_import"
+      ? contentType.toLowerCase().startsWith("multipart/form-data;")
+      : /^application\/json(?:\s*;|$)/i.test(contentType);
+  if (!validContentType) {
     return withCors(
       errorResponse(
         415,
         "unsupported_content_type",
-        "Content-Type must be multipart/form-data",
+        route === "screenplay_import"
+          ? "Content-Type must be multipart/form-data"
+          : "Content-Type must be application/json",
         requestId,
       ),
       cors,
@@ -115,9 +173,18 @@ export async function handleRequest(
   }
 
   const contentLength = parseContentLength(request.headers.get("content-length"));
-  if (contentLength !== null && contentLength > MAX_REQUEST_BYTES) {
+  const requestLimit =
+    route === "screenplay_import" ? MAX_REQUEST_BYTES : MAX_SPEECH_REQUEST_BYTES;
+  if (contentLength !== null && contentLength > requestLimit) {
     return withCors(
-      errorResponse(413, "request_too_large", "Request body exceeds 10 MiB", requestId),
+      errorResponse(
+        413,
+        "request_too_large",
+        route === "screenplay_import"
+          ? "Request body exceeds 10 MiB"
+          : "Request body exceeds 16 KiB",
+        requestId,
+      ),
       cors,
     );
   }
@@ -139,7 +206,7 @@ export async function handleRequest(
       errorResponse(
         503,
         "rate_limit_unavailable",
-        "Screenplay import rate limiting is unavailable",
+        "AI rate limiting is unavailable",
         requestId,
         { "Retry-After": "30" },
       ),
@@ -148,7 +215,7 @@ export async function handleRequest(
   }
   if (!rateDecision.allowed) {
     return withCors(
-      errorResponse(429, "rate_limited", "Too many screenplay imports", requestId, {
+      errorResponse(429, "rate_limited", "Too many AI requests", requestId, {
         "Retry-After": String(rateDecision.retryAfterSeconds),
       }),
       cors,
@@ -158,7 +225,7 @@ export async function handleRequest(
   const concurrencyLimit = positiveInteger(env.MAX_CONCURRENT_REQUESTS, 4, 1, 32);
   if (activeOpenAiRequests >= concurrencyLimit) {
     return withCors(
-      errorResponse(503, "capacity_exceeded", "Screenplay import is temporarily busy", requestId, {
+      errorResponse(503, "capacity_exceeded", "AI processing is temporarily busy", requestId, {
         "Retry-After": "5",
       }),
       cors,
@@ -167,15 +234,24 @@ export async function handleRequest(
 
   activeOpenAiRequests += 1;
   try {
-    return await processImport(
-      request,
-      env,
-      contentType,
-      requestId,
-      cors,
-      fetchImplementation,
-      providerErrorLogger,
-    );
+    return route === "screenplay_import"
+      ? await processImport(
+          request,
+          env,
+          contentType,
+          requestId,
+          cors,
+          fetchImplementation,
+          providerErrorLogger,
+        )
+      : await processSpeech(
+          request,
+          env,
+          requestId,
+          cors,
+          fetchImplementation,
+          providerErrorLogger,
+        );
   } finally {
     activeOpenAiRequests -= 1;
   }
@@ -452,16 +528,318 @@ async function processImport(
   }
 }
 
+type SpeechVoice = (typeof OPENAI_SPEECH_VOICES)[number];
+
+interface ValidatedSpeechRequest {
+  text: string;
+  voice: SpeechVoice;
+}
+
+interface SynthesizedSpeech {
+  audio: ArrayBuffer;
+  contentType: string;
+  model: string;
+  voice: SpeechVoice;
+}
+
+async function processSpeech(
+  request: Request,
+  env: Env,
+  requestId: string,
+  cors: ReturnType<typeof resolveCors>,
+  fetchImplementation: typeof fetch,
+  providerErrorLogger: typeof logProviderError,
+): Promise<Response> {
+  let value: unknown;
+  try {
+    const body = await readBodyWithLimit(request, MAX_SPEECH_REQUEST_BYTES);
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+  } catch (error) {
+    const tooLarge = error instanceof RequestTooLargeError;
+    return withCors(
+      errorResponse(
+        tooLarge ? 413 : 400,
+        tooLarge ? "request_too_large" : "invalid_json",
+        tooLarge ? "Request body exceeds 16 KiB" : "Request body must be valid JSON",
+        requestId,
+      ),
+      cors,
+    );
+  }
+
+  let speechRequest: ValidatedSpeechRequest;
+  try {
+    speechRequest = validateSpeechRequest(value);
+  } catch (error) {
+    if (error instanceof ClientInputError) {
+      return withCors(errorResponse(error.status, error.code, error.message, requestId), cors);
+    }
+    throw error;
+  }
+
+  const model = env.OPENAI_SPEECH_MODEL?.trim() || DEFAULT_SPEECH_MODEL;
+  if (!OPENAI_SPEECH_MODELS.has(model)) {
+    return withCors(
+      errorResponse(
+        503,
+        "service_not_configured",
+        "Configured OpenAI speech model is unsupported",
+        requestId,
+      ),
+      cors,
+    );
+  }
+  if (
+    (model === "tts-1" || model === "tts-1-hd") &&
+    !LEGACY_SPEECH_VOICES.has(speechRequest.voice)
+  ) {
+    return withCors(
+      errorResponse(
+        400,
+        "invalid_voice",
+        "voice is not supported by the configured speech model",
+        requestId,
+      ),
+      cors,
+    );
+  }
+
+  try {
+    const result = await synthesizeSpeech(
+      speechRequest,
+      model,
+      env,
+      fetchImplementation,
+    );
+    return withCors(
+      new Response(result.audio, {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store, private",
+          "Content-Length": String(result.audio.byteLength),
+          "Content-Type": result.contentType,
+          "X-Content-Type-Options": "nosniff",
+          "X-Request-Id": requestId,
+          "X-Speech-Model": result.model,
+          "X-Speech-Voice": result.voice,
+        },
+      }),
+      cors,
+    );
+  } catch (error) {
+    if (error instanceof OpenAiTimeoutError) {
+      return withCors(
+        errorResponse(504, "upstream_timeout", "Speech generation timed out", requestId),
+        cors,
+      );
+    }
+    if (error instanceof OpenAiError) {
+      providerErrorLogger(requestId, error);
+      const publicError = classifyOpenAiError(error, "speech");
+      return withCors(
+        errorResponse(502, publicError.code, publicError.message, requestId),
+        cors,
+      );
+    }
+    return withCors(
+      errorResponse(500, "internal_error", "Speech generation failed", requestId),
+      cors,
+    );
+  }
+}
+
+function validateSpeechRequest(value: unknown): ValidatedSpeechRequest {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ClientInputError(400, "invalid_request", "Request body must be a JSON object");
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  const unexpected = keys.find((key) => key !== "text" && key !== "voice");
+  if (unexpected) {
+    throw new ClientInputError(400, "unexpected_field", `Unexpected JSON field: ${unexpected}`);
+  }
+  if (typeof record.text !== "string") {
+    throw new ClientInputError(400, "invalid_text", "text must be a string");
+  }
+  if (typeof record.voice !== "string") {
+    throw new ClientInputError(400, "invalid_voice", "voice must be a string");
+  }
+
+  const text = record.text;
+  if (!text || text.trim() !== text) {
+    throw new ClientInputError(
+      400,
+      "invalid_text",
+      "text must be non-empty without outer whitespace",
+    );
+  }
+  if (/[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
+    throw new ClientInputError(400, "invalid_text", "text contains unsupported control characters");
+  }
+  for (const character of text) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
+      throw new ClientInputError(400, "invalid_text", "text contains invalid Unicode");
+    }
+  }
+  if ([...text].length > MAX_SPEECH_TEXT_CHARACTERS) {
+    throw new ClientInputError(
+      413,
+      "text_too_long",
+      `text exceeds ${MAX_SPEECH_TEXT_CHARACTERS} characters`,
+    );
+  }
+  if (new TextEncoder().encode(text).byteLength > MAX_SPEECH_TEXT_BYTES) {
+    throw new ClientInputError(
+      413,
+      "text_too_large",
+      "UTF-8 text exceeds 8 KiB",
+    );
+  }
+  if (!(OPENAI_SPEECH_VOICES as readonly string[]).includes(record.voice)) {
+    throw new ClientInputError(400, "invalid_voice", "voice is not supported");
+  }
+  return { text, voice: record.voice as SpeechVoice };
+}
+
+async function synthesizeSpeech(
+  request: ValidatedSpeechRequest,
+  model: string,
+  env: Env,
+  fetchImplementation: typeof fetch,
+): Promise<SynthesizedSpeech> {
+  const apiKey = env.OPENAI_API_KEY!.trim();
+  const keyCandidateError = getOpenAiKeyCandidateError(apiKey);
+  if (keyCandidateError) {
+    throw new OpenAiError({
+      ...emptyProviderError(),
+      operation: "configuration",
+      type: "authentication_error",
+      code: `invalid_api_key_${keyCandidateError}`,
+      message: "Stored OpenAI key does not match the expected key format.",
+    });
+  }
+
+  const timeoutMs = positiveInteger(env.OPENAI_SPEECH_TIMEOUT_MS, 30_000, 5_000, 60_000);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response: Response;
+    try {
+      response = await fetchImplementation(OPENAI_SPEECH_URL, {
+        method: "POST",
+        headers: {
+          Accept: "application/octet-stream",
+          Authorization: ["Bearer", apiKey].join(" "),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          input: request.text,
+          voice: request.voice,
+          response_format: SPEECH_RESPONSE_FORMAT,
+          stream_format: "audio",
+          ...(model.startsWith("gpt-4o-mini-tts")
+            ? { instructions: SPEECH_INSTRUCTIONS }
+            : {}),
+        }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) throw new OpenAiTimeoutError();
+      throw OpenAiError.fromTransport(error, "speech");
+    }
+    if (!response.ok) {
+      const providerError = await OpenAiError.fromResponse(response, "speech");
+      if (controller.signal.aborted) throw new OpenAiTimeoutError();
+      throw providerError;
+    }
+
+    const declaredLength = parseContentLength(response.headers.get("content-length"));
+    if (declaredLength !== null && declaredLength > MAX_SPEECH_AUDIO_BYTES) {
+      await response.body?.cancel();
+      throw invalidProviderResponse(
+        "speech",
+        "ResponseTooLarge",
+        response.headers.get("content-type"),
+      );
+    }
+
+    const providerContentType = sanitizeContentType(response.headers.get("content-type"));
+    if (
+      providerContentType &&
+      !providerContentType.startsWith("audio/") &&
+      providerContentType !== "application/octet-stream"
+    ) {
+      await response.body?.cancel();
+      throw invalidProviderResponse(
+        "speech",
+        "InvalidContentType",
+        response.headers.get("content-type"),
+      );
+    }
+
+    let audio: ArrayBuffer;
+    try {
+      audio = await readStreamWithLimit(response.body, MAX_SPEECH_AUDIO_BYTES);
+    } catch (error) {
+      if (controller.signal.aborted) throw new OpenAiTimeoutError();
+      if (error instanceof RequestTooLargeError) {
+        throw invalidProviderResponse(
+          "speech",
+          "ResponseTooLarge",
+          response.headers.get("content-type"),
+        );
+      }
+      throw OpenAiError.fromTransport(error, "speech");
+    }
+    if (audio.byteLength === 0) {
+      throw invalidProviderResponse(
+        "speech",
+        "EmptyResponse",
+        response.headers.get("content-type"),
+      );
+    }
+    return {
+      audio,
+      contentType:
+        providerContentType && providerContentType.startsWith("audio/")
+          ? providerContentType
+          : SPEECH_CONTENT_TYPE,
+      model,
+      voice: request.voice,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function invalidProviderResponse(
+  operation: SanitizedProviderError["operation"],
+  errorName: string,
+  contentType: string | null,
+): OpenAiError {
+  return new OpenAiError({
+    ...emptyProviderError(),
+    operation,
+    transportErrorName: errorName,
+    responseContentType: sanitizeContentType(contentType),
+  });
+}
+
 interface ValidatedUpload {
   bytes: Uint8Array;
-  mediaType: "image/jpeg" | "image/png";
+  mediaType: "image/jpeg" | "image/png" | "application/pdf";
+  kind: "image" | "pdf";
   title: string | null;
 }
 
 async function validateForm(form: FormData): Promise<ValidatedUpload> {
   let unexpectedField: string | null = null;
   form.forEach((_value, name) => {
-    if (name !== "image" && name !== "title") unexpectedField = name;
+    if (name !== "image" && name !== "file" && name !== "title") {
+      unexpectedField = name;
+    }
   });
   if (unexpectedField) {
     throw new ClientInputError(
@@ -472,13 +850,21 @@ async function validateForm(form: FormData): Promise<ValidatedUpload> {
   }
 
   const imageValues = form.getAll("image");
-  if (imageValues.length === 0) {
-    throw new ClientInputError(400, "missing_image", "Multipart field image is required");
+  const fileValues = form.getAll("file");
+  const uploadValues = [...imageValues, ...fileValues];
+  if (uploadValues.length === 0) {
+    throw new ClientInputError(400, "missing_image", "Multipart field image or file is required");
   }
-  if (imageValues.length !== 1 || typeof imageValues[0] === "string") {
-    throw new ClientInputError(400, "too_many_images", "Exactly one image is allowed");
+  if (uploadValues.length !== 1 || typeof uploadValues[0] === "string") {
+    throw new ClientInputError(
+      400,
+      fileValues.length === 0 ? "too_many_images" : "invalid_file_count",
+      fileValues.length === 0
+        ? "Exactly one image is allowed"
+        : "Exactly one uploaded file is allowed",
+    );
   }
-  const image = imageValues[0];
+  const upload = uploadValues[0];
 
   const titleValues = form.getAll("title");
   if (titleValues.length > 1) {
@@ -490,24 +876,45 @@ async function validateForm(form: FormData): Promise<ValidatedUpload> {
   const rawTitle = titleValues[0];
   const title = typeof rawTitle === "string" ? rawTitle.trim() || null : null;
 
-  if (image.size === 0) throw new ClientInputError(400, "empty_image", "Image must not be empty");
-  if (image.size > MAX_IMAGE_BYTES) {
-    throw new ClientInputError(413, "image_too_large", "Image exceeds 8 MiB");
+  if (upload.size === 0) {
+    throw new ClientInputError(
+      400,
+      imageValues.length === 1 ? "empty_image" : "empty_file",
+      imageValues.length === 1 ? "Image must not be empty" : "Uploaded file must not be empty",
+    );
+  }
+  if (upload.size > MAX_UPLOAD_BYTES) {
+    throw new ClientInputError(
+      413,
+      imageValues.length === 1 ? "image_too_large" : "file_too_large",
+      imageValues.length === 1 ? "Image exceeds 8 MiB" : "Uploaded file exceeds 8 MiB",
+    );
   }
   if (title && title.length > MAX_TITLE_LENGTH) {
     throw new ClientInputError(400, "title_too_long", "Title exceeds 200 characters");
   }
-  if (image.type !== "image/jpeg" && image.type !== "image/png") {
+  if (
+    upload.type !== "image/jpeg" &&
+    upload.type !== "image/png" &&
+    upload.type !== "application/pdf"
+  ) {
     throw new ClientInputError(
       415,
-      "unsupported_image_type",
-      "Only JPEG and PNG images are supported",
+      imageValues.length === 1 ? "unsupported_image_type" : "unsupported_file_type",
+      imageValues.length === 1
+        ? "Only JPEG and PNG images are supported"
+        : "Only JPEG, PNG, and PDF files are supported",
     );
   }
 
-  const bytes = new Uint8Array(await image.arrayBuffer());
+  const bytes = new Uint8Array(await upload.arrayBuffer());
+  if (upload.type === "application/pdf") {
+    validatePdf(bytes);
+    return { bytes, mediaType: "application/pdf", kind: "pdf", title };
+  }
+
   const detectedType = detectImageType(bytes);
-  if (!detectedType || detectedType !== image.type) {
+  if (!detectedType || detectedType !== upload.type) {
     throw new ClientInputError(
       415,
       "invalid_image",
@@ -515,13 +922,33 @@ async function validateForm(form: FormData): Promise<ValidatedUpload> {
     );
   }
 
-  return { bytes, mediaType: detectedType, title };
+  return { bytes, mediaType: detectedType, kind: "image", title };
 }
 
-function detectImageType(bytes: Uint8Array): ValidatedUpload["mediaType"] | null {
+function detectImageType(bytes: Uint8Array): "image/jpeg" | "image/png" | null {
   if (isValidJpeg(bytes)) return "image/jpeg";
   if (isValidPng(bytes)) return "image/png";
   return null;
+}
+
+function validatePdf(bytes: Uint8Array): void {
+  const decoder = new TextDecoder();
+  const header = decoder.decode(bytes.subarray(0, 16));
+  if (!/^%PDF-(?:1\.[0-9]|2\.[0-9])(?:\r|\n)/.test(header)) {
+    throw new ClientInputError(
+      415,
+      "invalid_pdf",
+      "PDF bytes do not contain a supported PDF header",
+    );
+  }
+  const trailer = decoder.decode(bytes.subarray(Math.max(0, bytes.length - 2_048)));
+  if (!/%%EOF[\s\u0000]*$/.test(trailer)) {
+    throw new ClientInputError(
+      415,
+      "invalid_pdf",
+      "PDF bytes do not contain a valid end marker",
+    );
+  }
 }
 
 function isValidPng(bytes: Uint8Array): boolean {
@@ -641,23 +1068,36 @@ async function extractScreenplay(
   let failure: unknown;
   try {
     const model = env.OPENAI_VISION_MODEL || "gpt-5.6-sol";
-    const imageContent =
-      upload.bytes.byteLength > MAX_INLINE_IMAGE_BYTES
+    const fileContent =
+      upload.kind === "pdf"
         ? {
-            type: "input_image",
-            file_id: (uploadedFileId = await uploadVisionFile(
+            type: "input_file",
+            file_id: (uploadedFileId = await uploadOpenAiFile(
               upload,
+              "user_data",
               apiKey,
               fetchImplementation,
               controller.signal,
             )),
-            detail: model.startsWith("gpt-5.6") ? "original" : "high",
+            detail: "high",
           }
-        : {
-            type: "input_image",
-            image_url: `data:${upload.mediaType};base64,${toBase64(upload.bytes)}`,
-            detail: model.startsWith("gpt-5.6") ? "original" : "high",
-          };
+        : upload.bytes.byteLength > MAX_INLINE_IMAGE_BYTES
+          ? {
+              type: "input_image",
+              file_id: (uploadedFileId = await uploadOpenAiFile(
+                upload,
+                "vision",
+                apiKey,
+                fetchImplementation,
+                controller.signal,
+              )),
+              detail: model.startsWith("gpt-5.6") ? "original" : "high",
+            }
+          : {
+              type: "input_image",
+              image_url: `data:${upload.mediaType};base64,${toBase64(upload.bytes)}`,
+              detail: model.startsWith("gpt-5.6") ? "original" : "high",
+            };
     const response = await fetchImplementation(OPENAI_RESPONSES_URL, {
       method: "POST",
       headers: {
@@ -678,9 +1118,12 @@ async function extractScreenplay(
             content: [
               {
                 type: "input_text",
-                text: "Transcribe the screenplay content in this image according to the production extraction instructions.",
+                text:
+                  upload.kind === "pdf"
+                    ? "Transcribe the screenplay content in this PDF according to the production extraction instructions."
+                    : "Transcribe the screenplay content in this image according to the production extraction instructions.",
               },
-              imageContent,
+              fileContent,
             ],
           },
         ],
@@ -707,7 +1150,7 @@ async function extractScreenplay(
     clearTimeout(timeout);
     if (uploadedFileId) {
       try {
-        await deleteVisionFile(uploadedFileId, apiKey, fetchImplementation);
+        await deleteOpenAiFile(uploadedFileId, apiKey, fetchImplementation);
       } catch (cleanupError) {
         if (failure) {
           if (cleanupError instanceof OpenAiError) {
@@ -749,17 +1192,23 @@ export function getOpenAiKeyCandidateError(value: string): string | null {
   return null;
 }
 
-async function uploadVisionFile(
+async function uploadOpenAiFile(
   upload: ValidatedUpload,
+  purpose: "vision" | "user_data",
   apiKey: string,
   fetchImplementation: typeof fetch,
   signal: AbortSignal,
 ): Promise<string> {
   const form = new FormData();
-  form.set("purpose", "vision");
+  form.set("purpose", purpose);
   form.set("expires_after[anchor]", "created_at");
   form.set("expires_after[seconds]", String(FILE_EXPIRATION_SECONDS));
-  const extension = upload.mediaType === "image/png" ? "png" : "jpg";
+  const extension =
+    upload.mediaType === "image/png"
+      ? "png"
+      : upload.mediaType === "application/pdf"
+        ? "pdf"
+        : "jpg";
   form.set(
     "file",
     new File([upload.bytes.slice().buffer], `screenplay.${extension}`, {
@@ -796,7 +1245,7 @@ async function uploadVisionFile(
   return id;
 }
 
-async function deleteVisionFile(
+async function deleteOpenAiFile(
   fileId: string,
   apiKey: string,
   fetchImplementation: typeof fetch,
@@ -848,8 +1297,15 @@ function extractOutputText(value: unknown): string {
 }
 
 async function readBodyWithLimit(request: Request, limit: number): Promise<ArrayBuffer> {
-  if (!request.body) return new ArrayBuffer(0);
-  const reader = request.body.getReader();
+  return readStreamWithLimit(request.body, limit);
+}
+
+async function readStreamWithLimit(
+  stream: ReadableStream<Uint8Array> | null,
+  limit: number,
+): Promise<ArrayBuffer> {
+  if (!stream) return new ArrayBuffer(0);
+  const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
 
@@ -921,6 +1377,8 @@ function resolveCors(
       "Access-Control-Allow-Origin": origin,
       "Access-Control-Allow-Methods": "POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Expose-Headers":
+        "X-Request-Id, X-OCR-Model, X-Speech-Model, X-Speech-Voice",
       "Access-Control-Max-Age": "86400",
       Vary: "Origin",
     },
@@ -983,6 +1441,7 @@ interface SanitizedProviderError {
   operation:
     | "configuration"
     | "responses"
+    | "speech"
     | "files.create"
     | "files.delete";
   status: number | null;
@@ -1163,13 +1622,17 @@ function logProviderError(requestId: string, error: OpenAiError): void {
   });
 }
 
-function classifyOpenAiError(error: OpenAiError): { code: string; message: string } {
+function classifyOpenAiError(
+  error: OpenAiError,
+  service: "vision" | "speech" = "vision",
+): { code: string; message: string } {
+  const label = service === "speech" ? "Speech" : "Vision";
   const code = error.provider.code?.toLowerCase();
   const type = error.provider.type?.toLowerCase();
   if (error.provider.status === 401 || type === "authentication_error") {
     return {
       code: "provider_auth_error",
-      message: "Vision provider authentication failed",
+      message: `${label} provider authentication failed`,
     };
   }
   if (
@@ -1178,16 +1641,16 @@ function classifyOpenAiError(error: OpenAiError): { code: string; message: strin
   ) {
     return {
       code: "provider_quota_exceeded",
-      message: "Vision provider quota is unavailable",
+      message: `${label} provider quota is unavailable`,
     };
   }
   if (code === "model_not_found" || code === "model_not_available") {
     return {
       code: "provider_model_unavailable",
-      message: "Configured vision model is unavailable",
+      message: `Configured ${service} model is unavailable`,
     };
   }
-  return { code: "upstream_error", message: "Vision processing failed" };
+  return { code: "upstream_error", message: `${label} processing failed` };
 }
 
 class OpenAiTimeoutError extends Error {}

@@ -89,7 +89,7 @@ export const screenplayJsonSchema = {
 } as const;
 
 export const screenplayExtractionInstructions = [
-  "You are a production screenplay transcription engine. Analyze the image visually and return only the screenplay content represented by the schema.",
+  "You are a production screenplay transcription engine. Analyze the provided image or PDF visually and return only the screenplay content represented by the schema.",
   "",
   "CONTENT BOUNDARY",
   "- Separate the screenplay page from surrounding PDF/image viewer chrome, audition-app controls, page thumbnails, toolbars, filenames, status bars, buttons, and navigation labels.",

@@ -7,8 +7,8 @@ Built with [Astro](https://astro.build) and [Tailwind CSS](https://tailwindcss.c
 a static site to GitHub Pages.
 
 The repository also contains the separately deployed Cloudflare Worker for LineReader's
-[screenplay import API](docs/line-reader-api.md). It keeps the OpenAI credential server-side; the
-static site does not receive or expose that secret.
+[cloud AI API](docs/line-reader-api.md), covering OpenAI screenplay import and speech. It keeps the
+OpenAI credential server-side; the static site and mobile client do not receive that secret.
 
 ## Local development
 

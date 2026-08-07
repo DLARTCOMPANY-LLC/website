@@ -1,22 +1,28 @@
-# LineReader screenplay import API
+# LineReader cloud AI API
 
-The screenplay import API is a Cloudflare Worker deployed separately from the static GitHub Pages
-site. GitHub Pages cannot execute server code or protect `OPENAI_API_KEY`.
+The OpenAI screenplay-import and speech API is a Cloudflare Worker deployed separately from the
+static GitHub Pages site. GitHub Pages and the public mobile app cannot protect
+`OPENAI_API_KEY`.
 
-## Endpoint
+## Screenplay import
 
 `POST /v1/screenplays/import`
 
-Send `multipart/form-data` with exactly these fields:
+Send `multipart/form-data` with exactly one upload plus an optional title:
 
 | Field | Type | Required | Limits |
 | --- | --- | --- | --- |
-| `image` | File | Yes | One JPEG or PNG, maximum 8 MiB and 40 megapixels |
+| `file` | File | Preferred | One JPEG, PNG, or PDF; maximum 8 MiB |
+| `image` | File | Legacy alternative | One JPEG or PNG; maximum 8 MiB and 40 megapixels |
 | `title` | String | No | Maximum 200 characters |
 
-The full request body is limited to 10 MiB. HEIC is rejected with `415` because the OpenAI image
-input contract does not currently accept HEIC; convert it to JPEG on-device before upload. The
-declared MIME type must match the image magic bytes.
+Do not send both `file` and `image`. The full request body is limited to 10 MiB. HEIC is rejected
+with `415`; convert it to JPEG before upload. Declared MIME types must match validated file bytes.
+PDFs are byte-bounded and checked for a PDF header/trailer without locally decompressing or
+rendering attacker-controlled content. OpenAI Responses performs the actual document parsing,
+extracting both text and page images at high detail. The Worker uploads PDFs transiently with
+`purpose=user_data` and deletes them after the response. Unsupported, encrypted, or malformed
+documents are rejected by OpenAI and mapped to a generic provider error.
 
 Successful responses use `application/json`:
 
@@ -71,14 +77,59 @@ Relevant statuses are `400`, `403`, `405`, `413`, `415`, `429`, `502`, `503`, an
 Safe provider-facing error codes include `provider_auth_error`, `provider_quota_exceeded`, and
 `provider_model_unavailable`; all other provider failures remain `upstream_error`.
 
+## OpenAI speech
+
+`POST /v1/audio/speech`
+
+Send `application/json` with exactly:
+
+```json
+{
+  "text": "Privacy-safe rehearsal line.",
+  "voice": "marin"
+}
+```
+
+| Field | Type | Limits |
+| --- | --- | --- |
+| `text` | String | One non-empty dialogue utterance, no outer whitespace, maximum 2,000 Unicode characters and 8 KiB UTF-8 |
+| `voice` | String | One allowlisted built-in OpenAI voice |
+
+Allowed voices are `alloy`, `ash`, `ballad`, `coral`, `echo`, `fable`, `nova`, `onyx`, `sage`,
+`shimmer`, `verse`, `marin`, and `cedar`. OpenAI currently recommends `marin` or `cedar` for best
+quality. The request body is limited to 16 KiB; unknown fields, unsupported controls, invalid
+Unicode, and unsupported voices are rejected before provider access.
+
+A successful response is binary AAC audio:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: audio/aac
+Cache-Control: no-store, private
+X-Speech-Model: gpt-4o-mini-tts
+X-Speech-Voice: marin
+X-Request-Id: <uuid>
+```
+
+The Worker uses OpenAI's current `POST /v1/audio/speech` API with `response_format: "aac"` and
+`stream_format: "audio"`. AAC is directly playable by iOS and Android. Audio is capped at 8 MiB,
+generated under a configurable 30-second timeout, and never cached. OpenAI requires the app to
+clearly disclose that playback is AI-generated speech.
+
+Errors use the same JSON shape as screenplay import. Provider authentication, quota, and model
+availability remain safely distinguishable without exposing provider response text.
+
 ## Privacy and cost controls
 
-- The Worker does not persist the upload or extracted screenplay. Responses requests set
+- The Worker does not persist uploads, extracted screenplay, dialogue sent for speech, or generated
+  audio. Responses requests set
   `store: false`. Images up to 5 MiB are sent inline; larger images are uploaded with OpenAI's
   `vision` file purpose to avoid base64 transport expansion, referenced once, and immediately
-  deleted. The file also receives a one-hour expiration as a cleanup backstop. A failed deletion
-  fails the API request rather than reporting success.
-- Application code does not log request bodies, image data, screenplay text, or OpenAI responses.
+  deleted. PDFs use the same transient workflow with `user_data`. Files receive a one-hour
+  expiration as a cleanup backstop. A failed deletion fails the API request rather than reporting
+  success.
+- Application code does not log request bodies, image/PDF data, screenplay/dialogue text, generated
+  audio, or OpenAI responses.
   Provider failures log only the endpoint operation, HTTP status, provider request ID, validated
   error type/code, transport error class, and response-format metadata. Bounded redacted messages
   are retained only inside the request's internal error object and are not logged. Logs never
@@ -86,19 +137,25 @@ Safe provider-facing error codes include `provider_auth_error`, `provider_quota_
   Cloudflare invocation metadata can still include timestamps, status codes, and request metadata.
 - `OPENAI_API_KEY` exists only as a Worker secret. Never ship it or a shared API secret in
   LineReader.
-- One image, byte limits, a configurable output-token ceiling, an upstream timeout, and an
-  isolate-local concurrency ceiling bound each request's cost.
+- One upload or speech utterance, byte/character limits, a configurable output-token ceiling,
+  upstream timeouts, and an isolate-local concurrency ceiling bound each request's cost.
 - A SQLite-backed Cloudflare Durable Object atomically enforces both the configurable per-IP budget
   (`RATE_LIMIT_REQUESTS`) and a global budget (`GLOBAL_RATE_LIMIT_REQUESTS`) in each
   `RATE_LIMIT_WINDOW_SECONDS` window. All edge locations coordinate through one named object.
   Expired client records are deleted, and client IP addresses are SHA-256 hashed before entering
   durable storage. The endpoint fails closed without a healthy `RATE_LIMITER` binding.
-- Native clients generally omit `Origin` and are accepted. Browser requests are accepted only when
+- Native clients generally omit `Origin` and are accepted. There is deliberately no embedded shared
+  app secret because a public mobile binary cannot keep one confidential. Durable per-IP/global
+  budgets are the server-enforced abuse and billing boundary. Browser requests are accepted only when
   their exact origin is listed in `CORS_ALLOWED_ORIGINS`; an empty list rejects all browser origins.
   CORS is not authentication.
 
 Review OpenAI's current API data controls and retention terms before production use, and disclose
-the image transfer in LineReader's privacy policy.
+file/dialogue transfer plus AI-generated speech in LineReader's privacy policy.
+
+Plain TXT files and pasted text do not require OCR and should be parsed deterministically by
+LineReader as text. Image and PDF visual extraction must use this OpenAI endpoint; this Worker
+contains no Apple Vision, Tesseract, or other non-OpenAI OCR path.
 
 ## Configuration and deployment
 
@@ -111,6 +168,8 @@ Required secret:
 Optional variables are documented in `.dev.vars.example`. The default model is
 `gpt-5.6-sol`; set `OPENAI_VISION_MODEL` to another Responses API model that supports image input
 and strict JSON Schema outputs. `CORS_ALLOWED_ORIGINS` is a comma-separated exact allowlist.
+`OPENAI_SPEECH_MODEL` defaults to `gpt-4o-mini-tts` and is restricted to supported OpenAI speech
+models. `OPENAI_SPEECH_TIMEOUT_MS` defaults to 30,000 milliseconds.
 `RATE_LIMIT_REQUESTS` defaults to 10 requests per client per 60 seconds, while
 `GLOBAL_RATE_LIMIT_REQUESTS` defaults to 100 total requests in the same durable global window.
 
@@ -156,7 +215,6 @@ npm run api:deploy
 
 The `v1` Wrangler migration creates the SQLite-backed `RateLimiter` Durable Object on first deploy.
 
-The deployment prints the assigned `workers.dev` URL. No Worker deployment URL is configured in
-this repository yet. After deployment, use
-`https://<assigned-worker-host>/v1/screenplays/import` in LineReader. For production, attach a
-dedicated API hostname in Cloudflare and update the app to that hostname.
+Production currently uses `https://dlartcompany-screenplay-api.dlartcompany.workers.dev`. LineReader
+uses `/v1/screenplays/import` for OpenAI OCR and `/v1/audio/speech` for OpenAI speech. A dedicated
+API hostname can replace the `workers.dev` hostname later without changing either route contract.

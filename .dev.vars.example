@@ -1,6 +1,7 @@
 # Copy to .dev.vars for local Worker development. Never commit .dev.vars.
 OPENAI_API_KEY=replace-with-a-local-development-key
 OPENAI_VISION_MODEL=gpt-5.6-sol
+OPENAI_SPEECH_MODEL=gpt-4o-mini-tts
 
 # Native clients normally omit Origin. Add only trusted browser origins here.
 CORS_ALLOWED_ORIGINS=http://localhost:4321
@@ -11,3 +12,4 @@ RATE_LIMIT_WINDOW_SECONDS=60
 MAX_CONCURRENT_REQUESTS=4
 OPENAI_TIMEOUT_MS=90000
 OPENAI_MAX_OUTPUT_TOKENS=10000
+OPENAI_SPEECH_TIMEOUT_MS=30000
