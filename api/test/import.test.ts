@@ -125,6 +125,48 @@ describe("POST screenplay import", () => {
     expect(result.items[4].text).toBe("(quietly)\nI already know what I want.");
   });
 
+  it("derives canonical display names from mixed-case spoken cues", async () => {
+    const mixedCase = {
+      ...waiterImport,
+      characters: ["SPENCER", "WAITer", "MITCH"],
+      items: waiterImport.items.map((item) => {
+        if (item.speaker === "Spencer") return { ...item, speaker: "SPENCER" };
+        if (item.speaker === "Waiter") return { ...item, speaker: "WAITer" };
+        if (item.speaker === "Mitch") return { ...item, speaker: "mItCh" };
+        return item;
+      }),
+    };
+    mixedCase.items[4] = {
+      ...mixedCase.items[4],
+      speaker: "MITCH (v.o.)",
+    };
+
+    const response = await handleRequest(
+      createRequest(),
+      env,
+      dependencies(vi.fn(async () => openAiResponse(mixedCase))),
+    );
+    const result = (await response.json()) as {
+      characters: string[];
+      items: Array<{ speaker: string | null; text: string }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(result.characters).toEqual(["Spencer", "Waiter", "Mitch"]);
+    expect(result.items.map((item) => item.speaker)).toEqual([
+      null,
+      null,
+      "Spencer",
+      "Waiter",
+      "Mitch (V.O.)",
+      "Spencer",
+      "Waiter",
+      "Mitch",
+      null,
+    ]);
+    expect(result.items[4].text).toBe("(quietly)\nI already know what I want.");
+  });
+
   it("rejects MIME spoofing before calling OpenAI", async () => {
     const openAiFetch = vi.fn();
     const form = new FormData();

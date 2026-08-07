@@ -74,30 +74,25 @@ export function validateModelImport(value: unknown): ModelScreenplayImport {
   if (!Array.isArray(root.characters)) {
     throw new ModelValidationError("characters must be an array");
   }
-  const characters = root.characters.map((character, index) =>
+  const providerCharacters = root.characters.map((character, index) =>
     requireNonEmptyString(character, `characters[${index}]`),
   );
-  if (characters.length === 0) {
+  if (providerCharacters.length === 0) {
     throw new ModelValidationError("at least one character is required");
   }
-  const canonicalCharacters = new Set<string>();
-  for (const character of characters) {
-    const canonical = character.toLocaleUpperCase("en-US");
-    if (reservedDirectionNames.has(canonical)) {
+  for (const character of providerCharacters) {
+    const { identity } = parseSpeakerCue(character);
+    if (reservedDirectionNames.has(identity.toLocaleUpperCase("en-US"))) {
       throw new ModelValidationError(`${character} is a direction, not a character`);
     }
-    if (canonicalCharacters.has(canonical)) {
-      throw new ModelValidationError(`duplicate character: ${character}`);
-    }
-    canonicalCharacters.add(canonical);
   }
 
   if (!Array.isArray(root.items) || root.items.length === 0) {
     throw new ModelValidationError("at least one screenplay item is required");
   }
 
-  const spokenCharacters = new Set<string>();
-  const spokenCharacterOrder: string[] = [];
+  const characterNames = new Map<string, string>();
+  const characters: string[] = [];
   let dialogueCount = 0;
   const items = root.items.map((item, index): ScreenplayItem => {
     const record = asRecord(item, `items[${index}]`);
@@ -115,29 +110,32 @@ export function validateModelImport(value: unknown): ModelScreenplayImport {
       throw new ModelValidationError(`items[${index}].isStageDirection must be a boolean`);
     }
 
+    let normalizedSpeaker: string | null;
     if (record.isStageDirection) {
       if (record.speaker !== null) {
         throw new ModelValidationError(`items[${index}].speaker must be null for a direction`);
       }
+      normalizedSpeaker = null;
     } else {
       const speaker = requireNonEmptyString(record.speaker, `items[${index}].speaker`);
-      const canonical = speaker.toLocaleUpperCase("en-US");
-      if (reservedDirectionNames.has(canonical)) {
+      const cue = parseSpeakerCue(speaker);
+      const identityKey = cue.identity.toLocaleUpperCase("en-US");
+      if (reservedDirectionNames.has(identityKey)) {
         throw new ModelValidationError(`${speaker} must be classified as a direction`);
       }
-      if (!canonicalCharacters.has(canonical)) {
-        throw new ModelValidationError(`dialogue speaker ${speaker} is missing from characters`);
+      let characterName = characterNames.get(identityKey);
+      if (!characterName) {
+        characterName = toDisplayName(cue.identity);
+        characterNames.set(identityKey, characterName);
+        characters.push(characterName);
       }
-      if (!spokenCharacters.has(canonical)) {
-        spokenCharacters.add(canonical);
-        spokenCharacterOrder.push(canonical);
-      }
+      normalizedSpeaker = characterName + cue.suffix;
       dialogueCount += 1;
     }
 
     return {
       order: index + 1,
-      speaker: record.speaker as string | null,
+      speaker: normalizedSpeaker,
       text,
       isStageDirection: record.isStageDirection,
       confidence,
@@ -147,20 +145,6 @@ export function validateModelImport(value: unknown): ModelScreenplayImport {
   if (dialogueCount === 0) {
     throw new ModelValidationError("at least one dialogue item is required");
   }
-  for (const canonical of canonicalCharacters) {
-    if (!spokenCharacters.has(canonical)) {
-      throw new ModelValidationError("every character must have a dialogue item");
-    }
-  }
-  if (
-    characters.some(
-      (character, index) =>
-        character.toLocaleUpperCase("en-US") !== spokenCharacterOrder[index],
-    )
-  ) {
-    throw new ModelValidationError("characters must be ordered by first spoken appearance");
-  }
-
   const diagnostics = asRecord(root.diagnostics, "diagnostics");
   assertExactKeys(diagnostics, ["overallConfidence", "warnings"], "diagnostics");
   const overallConfidence = requireConfidence(
@@ -170,6 +154,7 @@ export function validateModelImport(value: unknown): ModelScreenplayImport {
   if (!Array.isArray(diagnostics.warnings)) {
     throw new ModelValidationError("diagnostics.warnings must be an array");
   }
+
   const warnings = diagnostics.warnings.map((warning, index) =>
     requireNonEmptyString(warning, `diagnostics.warnings[${index}]`),
   );
@@ -179,6 +164,28 @@ export function validateModelImport(value: unknown): ModelScreenplayImport {
     items,
     diagnostics: { overallConfidence, warnings },
   };
+}
+
+function parseSpeakerCue(value: string): { identity: string; suffix: string } {
+  const trimmed = value.trim().replace(/\s+/g, " ");
+  const match = trimmed.match(/^(.*?)(\s+(?:\([^()]+\)\s*)+)$/);
+  const identity = (match?.[1] ?? trimmed).trim();
+  if (!identity) {
+    throw new ModelValidationError("speaker cue must include a character name");
+  }
+  const suffix = match
+    ? ` ${match[2]
+        .trim()
+        .replace(/\s+/g, " ")
+        .toLocaleUpperCase("en-US")}`
+    : "";
+  return { identity, suffix };
+}
+
+function toDisplayName(value: string): string {
+  return value
+    .toLocaleLowerCase("en-US")
+    .replace(/(^|[\s\-'])\p{L}/gu, (match) => match.toLocaleUpperCase("en-US"));
 }
 
 export class ModelValidationError extends Error {
