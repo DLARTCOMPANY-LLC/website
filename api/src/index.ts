@@ -13,9 +13,14 @@ import type {
 const MAX_REQUEST_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TITLE_LENGTH = 200;
+const MAX_TTS_REQUEST_BYTES = 16 * 1024;
+const MAX_TTS_INPUT_LENGTH = 4_096;
+const TTS_REQUEST_BODY_TIMEOUT_MS = 5_000;
+const DEFAULT_TTS_MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION = 20_000;
 const MAX_IMAGE_PIXELS = 40_000_000;
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
 const RATE_LIMITER_INSTANCE = "screenplay-import-global-v1";
 const RATE_LIMITER_URL = "https://rate-limiter.internal/check";
 const MAX_PROVIDER_ERROR_BYTES = 64 * 1024;
@@ -34,6 +39,12 @@ export interface Env {
   MAX_CONCURRENT_REQUESTS?: string;
   OPENAI_TIMEOUT_MS?: string;
   OPENAI_MAX_OUTPUT_TOKENS?: string;
+  OPENAI_TTS_MODEL?: string;
+  OPENAI_TTS_VOICE?: string;
+  OPENAI_TTS_FORMAT?: string;
+  OPENAI_TTS_TIMEOUT_MS?: string;
+  OPENAI_TTS_MAX_OUTPUT_BYTES?: string;
+  MAX_CONCURRENT_TTS_REQUESTS?: string;
 }
 
 interface HandlerDependencies {
@@ -53,6 +64,7 @@ interface RateLimitDecision {
 }
 
 let activeOpenAiRequests = 0;
+let activeTtsRequests = 0;
 
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
@@ -71,13 +83,19 @@ export async function handleRequest(
   const requestId = crypto.randomUUID();
   const cors = resolveCors(request, env);
   const pathname = new URL(request.url).pathname.replace(/\/+$/, "");
+  const endpoint =
+    pathname === "/v1/screenplays/import"
+      ? "screenplay-import"
+      : pathname === "/v1/tts/speech"
+        ? "tts"
+        : null;
 
   if (request.method === "OPTIONS") {
     return cors.allowed
       ? new Response(null, { status: 204, headers: cors.headers })
       : errorResponse(403, "origin_not_allowed", "Origin is not allowed", requestId);
   }
-  if (pathname !== "/v1/screenplays/import") {
+  if (!endpoint) {
     return withCors(
       errorResponse(404, "not_found", "Endpoint not found", requestId),
       cors,
@@ -96,18 +114,31 @@ export async function handleRequest(
   }
   if (!env.OPENAI_API_KEY?.trim()) {
     return withCors(
-      errorResponse(503, "service_not_configured", "Screenplay import is not configured", requestId),
+      errorResponse(
+        503,
+        "service_not_configured",
+        endpoint === "tts"
+          ? "Text-to-speech is not configured"
+          : "Screenplay import is not configured",
+        requestId,
+      ),
       cors,
     );
   }
 
   const contentType = request.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
+  const expectedContentType =
+    endpoint === "tts" ? "application/json" : "multipart/form-data";
+  const hasExpectedContentType =
+    endpoint === "tts"
+      ? contentType.split(";", 1)[0].trim().toLowerCase() === expectedContentType
+      : contentType.toLowerCase().startsWith(`${expectedContentType};`);
+  if (!hasExpectedContentType) {
     return withCors(
       errorResponse(
         415,
         "unsupported_content_type",
-        "Content-Type must be multipart/form-data",
+        `Content-Type must be ${expectedContentType}`,
         requestId,
       ),
       cors,
@@ -115,9 +146,18 @@ export async function handleRequest(
   }
 
   const contentLength = parseContentLength(request.headers.get("content-length"));
-  if (contentLength !== null && contentLength > MAX_REQUEST_BYTES) {
+  const maxRequestBytes =
+    endpoint === "tts" ? MAX_TTS_REQUEST_BYTES : MAX_REQUEST_BYTES;
+  if (contentLength !== null && contentLength > maxRequestBytes) {
     return withCors(
-      errorResponse(413, "request_too_large", "Request body exceeds 10 MiB", requestId),
+      errorResponse(
+        413,
+        "request_too_large",
+        endpoint === "tts"
+          ? "Request body exceeds 16 KiB"
+          : "Request body exceeds 10 MiB",
+        requestId,
+      ),
       cors,
     );
   }
@@ -139,7 +179,9 @@ export async function handleRequest(
       errorResponse(
         503,
         "rate_limit_unavailable",
-        "Screenplay import rate limiting is unavailable",
+        endpoint === "tts"
+          ? "Text-to-speech rate limiting is unavailable"
+          : "Screenplay import rate limiting is unavailable",
         requestId,
         { "Retry-After": "30" },
       ),
@@ -148,36 +190,74 @@ export async function handleRequest(
   }
   if (!rateDecision.allowed) {
     return withCors(
-      errorResponse(429, "rate_limited", "Too many screenplay imports", requestId, {
-        "Retry-After": String(rateDecision.retryAfterSeconds),
-      }),
+      errorResponse(
+        429,
+        "rate_limited",
+        endpoint === "tts" ? "Too many text-to-speech requests" : "Too many screenplay imports",
+        requestId,
+        {
+          "Retry-After": String(rateDecision.retryAfterSeconds),
+        },
+      ),
       cors,
     );
   }
 
+  let speechInput: SpeechInput | null = null;
+  if (endpoint === "tts") {
+    try {
+      speechInput = await parseSpeechInput(request, env);
+    } catch (error) {
+      return speechInputErrorResponse(error, requestId, cors);
+    }
+  }
+
   const concurrencyLimit = positiveInteger(env.MAX_CONCURRENT_REQUESTS, 4, 1, 32);
-  if (activeOpenAiRequests >= concurrencyLimit) {
+  const ttsConcurrencyLimit = positiveInteger(env.MAX_CONCURRENT_TTS_REQUESTS, 2, 1, 4);
+  if (
+    activeOpenAiRequests >= concurrencyLimit ||
+    (endpoint === "tts" && activeTtsRequests >= ttsConcurrencyLimit)
+  ) {
     return withCors(
-      errorResponse(503, "capacity_exceeded", "Screenplay import is temporarily busy", requestId, {
-        "Retry-After": "5",
-      }),
+      errorResponse(
+        503,
+        "capacity_exceeded",
+        endpoint === "tts"
+          ? "Text-to-speech is temporarily busy"
+          : "Screenplay import is temporarily busy",
+        requestId,
+        {
+          "Retry-After": "5",
+        },
+      ),
       cors,
     );
   }
 
   activeOpenAiRequests += 1;
+  if (endpoint === "tts") activeTtsRequests += 1;
   try {
-    return await processImport(
-      request,
-      env,
-      contentType,
-      requestId,
-      cors,
-      fetchImplementation,
-      providerErrorLogger,
-    );
+    return endpoint === "tts"
+      ? await processSpeech(
+          speechInput!,
+          env,
+          requestId,
+          cors,
+          fetchImplementation,
+          providerErrorLogger,
+        )
+      : await processImport(
+          request,
+          env,
+          contentType,
+          requestId,
+          cors,
+          fetchImplementation,
+          providerErrorLogger,
+        );
   } finally {
     activeOpenAiRequests -= 1;
+    if (endpoint === "tts") activeTtsRequests -= 1;
   }
 }
 
@@ -360,6 +440,279 @@ function parseInternalPositiveInteger(value: string | null, maximum: number): nu
   if (!value || !/^\d+$/.test(value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= maximum ? parsed : null;
+}
+
+const TTS_VOICES = new Set([
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "fable",
+  "marin",
+  "nova",
+  "onyx",
+  "sage",
+  "shimmer",
+  "verse",
+  "cedar",
+]);
+const TTS_FORMAT_CONTENT_TYPES = {
+  mp3: { response: "audio/mpeg", accepted: ["audio/mpeg", "audio/mp3"] },
+  opus: { response: "audio/ogg", accepted: ["audio/ogg", "audio/opus"] },
+  aac: { response: "audio/aac", accepted: ["audio/aac", "audio/mp4"] },
+  flac: { response: "audio/flac", accepted: ["audio/flac", "audio/x-flac"] },
+  wav: { response: "audio/wav", accepted: ["audio/wav", "audio/x-wav"] },
+  pcm: {
+    response: "application/octet-stream",
+    accepted: ["application/octet-stream", "audio/pcm", "audio/l16"],
+  },
+} as const;
+
+type TtsFormat = keyof typeof TTS_FORMAT_CONTENT_TYPES;
+
+interface SpeechInput {
+  input: string;
+  model: string;
+  voice: string;
+  format: TtsFormat;
+}
+
+async function processSpeech(
+  speechInput: SpeechInput,
+  env: Env,
+  requestId: string,
+  cors: ReturnType<typeof resolveCors>,
+  fetchImplementation: typeof fetch,
+  providerErrorLogger: typeof logProviderError,
+): Promise<Response> {
+  try {
+    const result = await synthesizeSpeech(speechInput, env, fetchImplementation);
+    return withCors(
+      new Response(result.audio, {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store",
+          "Content-Disposition": `inline; filename="speech.${speechInput.format}"`,
+          "Content-Length": String(result.audio.byteLength),
+          "Content-Type": TTS_FORMAT_CONTENT_TYPES[speechInput.format].response,
+          "X-Content-Type-Options": "nosniff",
+          "X-Request-Id": requestId,
+          "X-TTS-Format": speechInput.format,
+          "X-TTS-Model": result.model,
+          "X-TTS-Provider": "openai",
+          "X-TTS-Voice": speechInput.voice,
+        },
+      }),
+      cors,
+    );
+  } catch (error) {
+    if (error instanceof OpenAiTimeoutError) {
+      return withCors(
+        errorResponse(504, "upstream_timeout", "Speech generation timed out", requestId),
+        cors,
+      );
+    }
+    if (error instanceof ProviderResponseTooLargeError) {
+      return withCors(
+        errorResponse(
+          502,
+          "upstream_response_too_large",
+          "Speech provider returned too much audio",
+          requestId,
+        ),
+        cors,
+      );
+    }
+    if (error instanceof OpenAiError) {
+      providerErrorLogger(requestId, error);
+      const publicError = classifyOpenAiError(error, "speech");
+      return withCors(
+        errorResponse(502, publicError.code, publicError.message, requestId),
+        cors,
+      );
+    }
+    return withCors(
+      errorResponse(500, "internal_error", "Speech generation failed", requestId),
+      cors,
+    );
+  }
+}
+
+function speechInputErrorResponse(
+  error: unknown,
+  requestId: string,
+  cors: ReturnType<typeof resolveCors>,
+): Response {
+  if (error instanceof RequestTooLargeError) {
+    return withCors(
+      errorResponse(413, "request_too_large", "Request body exceeds 16 KiB", requestId),
+      cors,
+    );
+  }
+  if (error instanceof RequestBodyTimeoutError) {
+    return withCors(
+      errorResponse(408, "request_timeout", "Request body was not received in time", requestId),
+      cors,
+    );
+  }
+  if (error instanceof ClientInputError) {
+    return withCors(errorResponse(error.status, error.code, error.message, requestId), cors);
+  }
+  if (error instanceof ServiceConfigurationError) {
+    return withCors(
+      errorResponse(503, "service_not_configured", error.message, requestId),
+      cors,
+    );
+  }
+  return withCors(
+    errorResponse(500, "internal_error", "Text-to-speech request failed", requestId),
+    cors,
+  );
+}
+
+async function parseSpeechInput(request: Request, env: Env): Promise<SpeechInput> {
+  const body = await readBodyWithLimit(
+    request,
+    MAX_TTS_REQUEST_BYTES,
+    TTS_REQUEST_BODY_TIMEOUT_MS,
+  );
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(body));
+  } catch {
+    throw new ClientInputError(400, "invalid_json", "Request body must be valid JSON");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ClientInputError(400, "invalid_request", "Request body must be a JSON object");
+  }
+
+  const record = value as Record<string, unknown>;
+  const unexpectedField = Object.keys(record).find(
+    (field) => field !== "input" && field !== "voice" && field !== "format",
+  );
+  if (unexpectedField) {
+    throw new ClientInputError(400, "unexpected_field", `Unexpected JSON field: ${unexpectedField}`);
+  }
+  if (typeof record.input !== "string") {
+    throw new ClientInputError(400, "invalid_input", "input must be a string");
+  }
+  if (record.input.trim().length === 0) {
+    throw new ClientInputError(400, "empty_input", "input must not be empty");
+  }
+  if (record.input.length > MAX_TTS_INPUT_LENGTH) {
+    throw new ClientInputError(
+      400,
+      "input_too_long",
+      "input exceeds 4096 characters",
+    );
+  }
+
+  const model = (env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts").trim();
+  if (!model || model.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(model)) {
+    throw new ServiceConfigurationError("Configured text-to-speech model is invalid");
+  }
+  const configuredVoice = (env.OPENAI_TTS_VOICE || "alloy").trim();
+  if (!TTS_VOICES.has(configuredVoice)) {
+    throw new ServiceConfigurationError("Configured text-to-speech voice is invalid");
+  }
+  const voice = record.voice === undefined ? configuredVoice : record.voice;
+  if (typeof voice !== "string" || !TTS_VOICES.has(voice)) {
+    throw new ClientInputError(400, "invalid_voice", "voice is not supported");
+  }
+
+  const configuredFormat = (env.OPENAI_TTS_FORMAT || "mp3").trim();
+  if (!isTtsFormat(configuredFormat)) {
+    throw new ServiceConfigurationError("Configured text-to-speech format is invalid");
+  }
+  const format = record.format === undefined ? configuredFormat : record.format;
+  if (typeof format !== "string" || !isTtsFormat(format)) {
+    throw new ClientInputError(400, "invalid_format", "format is not supported");
+  }
+
+  return { input: record.input, model, voice, format };
+}
+
+function isTtsFormat(value: string): value is TtsFormat {
+  return Object.hasOwn(TTS_FORMAT_CONTENT_TYPES, value);
+}
+
+async function synthesizeSpeech(
+  input: SpeechInput,
+  env: Env,
+  fetchImplementation: typeof fetch,
+): Promise<{ audio: ArrayBuffer; model: string }> {
+  const apiKey = env.OPENAI_API_KEY!.trim();
+  const keyCandidateError = getOpenAiKeyCandidateError(apiKey);
+  if (keyCandidateError) {
+    throw new OpenAiError({
+      ...emptyProviderError(),
+      operation: "configuration",
+      type: "authentication_error",
+      code: `invalid_api_key_${keyCandidateError}`,
+      message: "Stored OpenAI key does not match the expected key format.",
+    });
+  }
+
+  const timeoutMs = positiveInteger(env.OPENAI_TTS_TIMEOUT_MS, 30_000, 1_000, 90_000);
+  const maxOutputBytes = positiveInteger(
+    env.OPENAI_TTS_MAX_OUTPUT_BYTES,
+    DEFAULT_TTS_MAX_OUTPUT_BYTES,
+    1_024,
+    DEFAULT_TTS_MAX_OUTPUT_BYTES,
+  );
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response: Response;
+    try {
+      response = await fetchImplementation(OPENAI_SPEECH_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: input.model,
+          input: input.input,
+          voice: input.voice,
+          response_format: input.format,
+        }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      throw controller.signal.aborted
+        ? new OpenAiTimeoutError()
+        : OpenAiError.fromTransport(error, "audio.speech");
+    }
+    if (!response.ok) throw await OpenAiError.fromResponse(response, "audio.speech");
+
+    const providerContentType = sanitizeContentType(response.headers.get("content-type"));
+    const acceptedContentTypes = TTS_FORMAT_CONTENT_TYPES[input.format].accepted as readonly string[];
+    if (!providerContentType || !acceptedContentTypes.includes(providerContentType)) {
+      throw new OpenAiError({
+        ...emptyProviderError(),
+        operation: "audio.speech",
+        transportErrorName: "InvalidResponse",
+        transportMessage: "OpenAI speech response used an unexpected content type.",
+        responseContentType: providerContentType,
+      });
+    }
+
+    const contentLength = parseContentLength(response.headers.get("content-length"));
+    if (contentLength !== null && contentLength > maxOutputBytes) {
+      await response.body?.cancel();
+      throw new ProviderResponseTooLargeError();
+    }
+    return {
+      audio: await readResponseBodyWithLimit(response, maxOutputBytes),
+      model: input.model,
+    };
+  } catch (error) {
+    throw controller.signal.aborted ? new OpenAiTimeoutError() : error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function processImport(
@@ -847,22 +1200,42 @@ function extractOutputText(value: unknown): string {
   return texts[0];
 }
 
-async function readBodyWithLimit(request: Request, limit: number): Promise<ArrayBuffer> {
+async function readBodyWithLimit(
+  request: Request,
+  limit: number,
+  timeoutMs?: number,
+): Promise<ArrayBuffer> {
   if (!request.body) return new ArrayBuffer(0);
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let timedOut = false;
+  const timeout =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true;
+          void reader.cancel().catch(() => undefined);
+        }, timeoutMs);
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel();
-      throw new RequestTooLargeError();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        throw new RequestTooLargeError();
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } catch (error) {
+    if (timedOut) throw new RequestBodyTimeoutError();
+    throw error;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
+  if (timedOut) throw new RequestBodyTimeoutError();
 
   const buffer = new ArrayBuffer(total);
   const body = new Uint8Array(buffer);
@@ -872,6 +1245,45 @@ async function readBodyWithLimit(request: Request, limit: number): Promise<Array
     offset += chunk.byteLength;
   }
   return buffer;
+}
+
+async function readResponseBodyWithLimit(
+  response: Response,
+  limit: number,
+): Promise<ArrayBuffer> {
+  if (!response.body) {
+    throw new OpenAiError({
+      ...emptyProviderError(),
+      operation: "audio.speech",
+      transportErrorName: "InvalidResponse",
+      transportMessage: "OpenAI speech response did not contain audio.",
+    });
+  }
+  const reader = response.body.getReader();
+  const storage = new Uint8Array(limit);
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const nextTotal = total + value.byteLength;
+    if (nextTotal > limit) {
+      await reader.cancel();
+      throw new ProviderResponseTooLargeError();
+    }
+    storage.set(value, total);
+    total = nextTotal;
+  }
+  if (total === 0) {
+    throw new OpenAiError({
+      ...emptyProviderError(),
+      operation: "audio.speech",
+      transportErrorName: "InvalidResponse",
+      transportMessage: "OpenAI speech response contained no audio bytes.",
+    });
+  }
+
+  return storage.buffer.slice(0, total);
 }
 
 function toBase64(bytes: Uint8Array): string {
@@ -978,11 +1390,15 @@ class ClientInputError extends Error {
 }
 
 class RequestTooLargeError extends Error {}
+class RequestBodyTimeoutError extends Error {}
+class ProviderResponseTooLargeError extends Error {}
+class ServiceConfigurationError extends Error {}
 
 interface SanitizedProviderError {
   operation:
     | "configuration"
     | "responses"
+    | "audio.speech"
     | "files.create"
     | "files.delete";
   status: number | null;
@@ -1163,13 +1579,17 @@ function logProviderError(requestId: string, error: OpenAiError): void {
   });
 }
 
-function classifyOpenAiError(error: OpenAiError): { code: string; message: string } {
+function classifyOpenAiError(
+  error: OpenAiError,
+  capability: "vision" | "speech" = "vision",
+): { code: string; message: string } {
+  const providerLabel = capability === "speech" ? "Speech" : "Vision";
   const code = error.provider.code?.toLowerCase();
   const type = error.provider.type?.toLowerCase();
   if (error.provider.status === 401 || type === "authentication_error") {
     return {
       code: "provider_auth_error",
-      message: "Vision provider authentication failed",
+      message: `${providerLabel} provider authentication failed`,
     };
   }
   if (
@@ -1178,16 +1598,19 @@ function classifyOpenAiError(error: OpenAiError): { code: string; message: strin
   ) {
     return {
       code: "provider_quota_exceeded",
-      message: "Vision provider quota is unavailable",
+      message: `${providerLabel} provider quota is unavailable`,
     };
   }
   if (code === "model_not_found" || code === "model_not_available") {
     return {
       code: "provider_model_unavailable",
-      message: "Configured vision model is unavailable",
+      message: `Configured ${capability} model is unavailable`,
     };
   }
-  return { code: "upstream_error", message: "Vision processing failed" };
+  return {
+    code: "upstream_error",
+    message: capability === "speech" ? "Speech generation failed" : "Vision processing failed",
+  };
 }
 
 class OpenAiTimeoutError extends Error {}
