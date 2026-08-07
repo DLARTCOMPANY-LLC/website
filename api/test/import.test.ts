@@ -277,6 +277,91 @@ describe("POST screenplay import", () => {
     ]);
   });
 
+  it("splits multiple leading and trailing parentheticals but not inline parentheses", async () => {
+    const parentheticalImport = {
+      ...waiterImport,
+      characters: ["SPENCER"],
+      items: [
+        {
+          ...waiterImport.items[2],
+          order: 1,
+          speaker: "SPENCER",
+          text: [
+            "(whispering)",
+            "First line (spoken aside).",
+            "(beat)",
+            "(then; louder)",
+            "Last line.",
+            "(trailing direction)",
+          ].join("\n"),
+        },
+      ],
+    };
+
+    const response = await handleRequest(
+      createRequest(),
+      env,
+      dependencies(vi.fn(async () => openAiResponse(parentheticalImport))),
+    );
+    const result = (await response.json()) as {
+      characters: string[];
+      items: Array<{
+        order: number;
+        speaker: string | null;
+        text: string;
+        isStageDirection: boolean;
+        confidence: number;
+      }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(result.characters).toEqual(["Spencer"]);
+    expect(result.items).toEqual([
+      {
+        order: 1,
+        speaker: null,
+        text: "(whispering)",
+        isStageDirection: true,
+        confidence: 0.99,
+      },
+      {
+        order: 2,
+        speaker: "Spencer",
+        text: "First line (spoken aside).",
+        isStageDirection: false,
+        confidence: 0.99,
+      },
+      {
+        order: 3,
+        speaker: null,
+        text: "(beat)",
+        isStageDirection: true,
+        confidence: 0.99,
+      },
+      {
+        order: 4,
+        speaker: null,
+        text: "(then; louder)",
+        isStageDirection: true,
+        confidence: 0.99,
+      },
+      {
+        order: 5,
+        speaker: "Spencer",
+        text: "Last line.",
+        isStageDirection: false,
+        confidence: 0.99,
+      },
+      {
+        order: 6,
+        speaker: null,
+        text: "(trailing direction)",
+        isStageDirection: true,
+        confidence: 0.99,
+      },
+    ]);
+  });
+
   it("removes audition UI accidentally merged into retained stage text", async () => {
     const mergedUiImport = {
       ...waiterImport,
