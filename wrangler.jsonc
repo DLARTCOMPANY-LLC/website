@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dlartcompany-screenplay-api",
+  "main": "api/src/index.ts",
+  "compatibility_date": "2026-08-07",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  },
+  "vars": {
+    "OPENAI_VISION_MODEL": "gpt-4.1-mini",
+    "CORS_ALLOWED_ORIGINS": "",
+    "RATE_LIMIT_REQUESTS": "10",
+    "RATE_LIMIT_WINDOW_SECONDS": "60",
+    "MAX_CONCURRENT_REQUESTS": "4",
+    "OPENAI_TIMEOUT_MS": "45000",
+    "OPENAI_MAX_OUTPUT_TOKENS": "6000"
+  }
+}

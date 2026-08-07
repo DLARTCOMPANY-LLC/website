@@ -6,6 +6,10 @@ and art.
 Built with [Astro](https://astro.build) and [Tailwind CSS](https://tailwindcss.com), deployed as
 a static site to GitHub Pages.
 
+The repository also contains the separately deployed Cloudflare Worker for LineReader's
+[screenplay import API](docs/line-reader-api.md). It keeps the OpenAI credential server-side; the
+static site does not receive or expose that secret.
+
 ## Local development
 
 Requires Node 22+ (see `.nvmrc`).
@@ -16,6 +20,8 @@ npm run dev      # dev server at http://localhost:4321
 npm run build    # production build into dist/
 npm run preview  # serve the production build locally
 npm run check    # TypeScript / Astro diagnostics
+npm run api:test # screenplay import API tests
+npm run api:typecheck
 ```
 
 ## Editing the site
