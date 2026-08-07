@@ -17,6 +17,10 @@ const MAX_IMAGE_PIXELS = 40_000_000;
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const RATE_LIMITER_INSTANCE = "screenplay-import-global-v1";
 const RATE_LIMITER_URL = "https://rate-limiter.internal/check";
+const MAX_PROVIDER_ERROR_BYTES = 64 * 1024;
+const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
+const OPENAI_FILES_URL = "https://api.openai.com/v1/files";
+const FILE_EXPIRATION_SECONDS = 3_600;
 
 export interface Env {
   OPENAI_API_KEY?: string;
@@ -34,6 +38,7 @@ export interface Env {
 interface HandlerDependencies {
   fetch: typeof fetch;
   takeRateLimit: typeof takeDurableRateLimit;
+  logProviderError: typeof logProviderError;
 }
 
 export interface RateWindow {
@@ -61,6 +66,7 @@ export async function handleRequest(
 ): Promise<Response> {
   const fetchImplementation = dependencies.fetch ?? fetch;
   const takeRateLimit = dependencies.takeRateLimit ?? takeDurableRateLimit;
+  const providerErrorLogger = dependencies.logProviderError ?? logProviderError;
   const requestId = crypto.randomUUID();
   const cors = resolveCors(request, env);
   const pathname = new URL(request.url).pathname.replace(/\/+$/, "");
@@ -87,7 +93,7 @@ export async function handleRequest(
   if (!cors.allowed) {
     return errorResponse(403, "origin_not_allowed", "Origin is not allowed", requestId);
   }
-  if (!env.OPENAI_API_KEY) {
+  if (!env.OPENAI_API_KEY?.trim()) {
     return withCors(
       errorResponse(503, "service_not_configured", "Screenplay import is not configured", requestId),
       cors,
@@ -167,6 +173,7 @@ export async function handleRequest(
       requestId,
       cors,
       fetchImplementation,
+      providerErrorLogger,
     );
   } finally {
     activeOpenAiRequests -= 1;
@@ -361,6 +368,7 @@ async function processImport(
   requestId: string,
   cors: ReturnType<typeof resolveCors>,
   fetchImplementation: typeof fetch,
+  providerErrorLogger: typeof logProviderError,
 ): Promise<Response> {
   let form: FormData;
   try {
@@ -394,7 +402,13 @@ async function processImport(
   }
 
   try {
-    const result = await extractScreenplay(upload, env, fetchImplementation);
+    const result = await extractScreenplay(
+      upload,
+      env,
+      fetchImplementation,
+      requestId,
+      providerErrorLogger,
+    );
     return withCors(
       jsonResponse(200, result, {
         "Cache-Control": "no-store",
@@ -422,8 +436,10 @@ async function processImport(
       );
     }
     if (error instanceof OpenAiError) {
+      providerErrorLogger(requestId, error);
+      const publicError = classifyOpenAiError(error);
       return withCors(
-        errorResponse(502, "upstream_error", "Vision processing failed", requestId),
+        errorResponse(502, publicError.code, publicError.message, requestId),
         cors,
       );
     }
@@ -599,18 +615,49 @@ async function extractScreenplay(
   upload: ValidatedUpload,
   env: Env,
   fetchImplementation: typeof fetch,
+  requestId: string,
+  providerErrorLogger: typeof logProviderError,
 ): Promise<ScreenplayImport> {
   const timeoutMs = positiveInteger(env.OPENAI_TIMEOUT_MS, 45_000, 5_000, 90_000);
   const maxOutputTokens = positiveInteger(env.OPENAI_MAX_OUTPUT_TOKENS, 6_000, 1_000, 10_000);
+  const apiKey = env.OPENAI_API_KEY!.trim();
+  if (!/^sk-(?:proj-)?[A-Za-z0-9_-]{20,}$/.test(apiKey)) {
+    throw new OpenAiError({
+      ...emptyProviderError(),
+      operation: "configuration",
+      type: "authentication_error",
+      code: "invalid_api_key_format",
+      message: "Stored OpenAI key does not match the expected key format.",
+    });
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   let envelope: unknown;
+  let uploadedFileId: string | null = null;
+  let failure: unknown;
   try {
+    const imageContent =
+      upload.bytes.byteLength > MAX_INLINE_IMAGE_BYTES
+        ? {
+            type: "input_image",
+            file_id: (uploadedFileId = await uploadVisionFile(
+              upload,
+              apiKey,
+              fetchImplementation,
+              controller.signal,
+            )),
+            detail: "high",
+          }
+        : {
+            type: "input_image",
+            image_url: `data:${upload.mediaType};base64,${toBase64(upload.bytes)}`,
+            detail: "high",
+          };
     const response = await fetchImplementation(OPENAI_RESPONSES_URL, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -632,11 +679,7 @@ async function extractScreenplay(
                   "Use confidence and warnings to identify uncertain or illegible text. Do not guess missing words.",
                 ].join("\n"),
               },
-              {
-                type: "input_image",
-                image_url: `data:${upload.mediaType};base64,${toBase64(upload.bytes)}`,
-                detail: "high",
-              },
+              imageContent,
             ],
           },
         ],
@@ -651,14 +694,31 @@ async function extractScreenplay(
       }),
       signal: controller.signal,
     });
-    if (!response.ok) throw new OpenAiError();
+    if (!response.ok) throw await OpenAiError.fromResponse(response, "responses");
     envelope = await response.json();
   } catch (error) {
-    if (controller.signal.aborted) throw new OpenAiTimeoutError();
-    throw new OpenAiError();
+    failure = controller.signal.aborted
+      ? new OpenAiTimeoutError()
+      : error instanceof OpenAiError
+        ? error
+        : OpenAiError.fromTransport(error, "responses");
   } finally {
     clearTimeout(timeout);
+    if (uploadedFileId) {
+      try {
+        await deleteVisionFile(uploadedFileId, apiKey, fetchImplementation);
+      } catch (cleanupError) {
+        if (failure) {
+          if (cleanupError instanceof OpenAiError) {
+            providerErrorLogger(requestId, cleanupError);
+          }
+        } else {
+          failure = cleanupError;
+        }
+      }
+    }
   }
+  if (failure) throw failure;
 
   const outputText = extractOutputText(envelope);
 
@@ -670,6 +730,77 @@ async function extractScreenplay(
   }
   const validated = validateModelImport(parsed);
   return { title: upload.title, ...validated };
+}
+
+async function uploadVisionFile(
+  upload: ValidatedUpload,
+  apiKey: string,
+  fetchImplementation: typeof fetch,
+  signal: AbortSignal,
+): Promise<string> {
+  const form = new FormData();
+  form.set("purpose", "vision");
+  form.set("expires_after[anchor]", "created_at");
+  form.set("expires_after[seconds]", String(FILE_EXPIRATION_SECONDS));
+  const extension = upload.mediaType === "image/png" ? "png" : "jpg";
+  form.set(
+    "file",
+    new File([upload.bytes.slice().buffer], `screenplay.${extension}`, {
+      type: upload.mediaType,
+    }),
+  );
+
+  let response: Response;
+  try {
+    response = await fetchImplementation(OPENAI_FILES_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      signal,
+    });
+  } catch (error) {
+    throw OpenAiError.fromTransport(error, "files.create");
+  }
+  if (!response.ok) throw await OpenAiError.fromResponse(response, "files.create");
+
+  const value: unknown = await response.json();
+  const id =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>).id
+      : null;
+  if (typeof id !== "string" || !/^file-[A-Za-z0-9_-]+$/.test(id)) {
+    throw new OpenAiError({
+      ...emptyProviderError(),
+      operation: "files.create",
+      transportErrorName: "InvalidResponse",
+      transportMessage: "OpenAI file upload returned an invalid identifier.",
+    });
+  }
+  return id;
+}
+
+async function deleteVisionFile(
+  fileId: string,
+  apiKey: string,
+  fetchImplementation: typeof fetch,
+): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetchImplementation(`${OPENAI_FILES_URL}/${encodeURIComponent(fileId)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    if (!response.ok && response.status !== 404) {
+      throw await OpenAiError.fromResponse(response, "files.delete");
+    }
+  } catch (error) {
+    if (error instanceof OpenAiError) throw error;
+    throw OpenAiError.fromTransport(error, "files.delete");
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function extractOutputText(value: unknown): string {
@@ -830,5 +961,216 @@ class ClientInputError extends Error {
 }
 
 class RequestTooLargeError extends Error {}
-class OpenAiError extends Error {}
+
+interface SanitizedProviderError {
+  operation:
+    | "configuration"
+    | "responses"
+    | "files.create"
+    | "files.delete";
+  status: number | null;
+  requestId: string | null;
+  type: string | null;
+  code: string | null;
+  message: string | null;
+  transportErrorName: string | null;
+  transportMessage: string | null;
+  responseContentType: string | null;
+  responseBodyBytes: number | null;
+  responseBodyFormat:
+    | "empty"
+    | "json_error"
+    | "json_other"
+    | "invalid_json"
+    | "read_error"
+    | "too_large"
+    | null;
+}
+
+export class OpenAiError extends Error {
+  constructor(readonly provider: SanitizedProviderError = emptyProviderError()) {
+    super("OpenAI request failed");
+    this.name = "OpenAiError";
+  }
+
+  static async fromResponse(
+    response: Response,
+    operation: SanitizedProviderError["operation"],
+  ): Promise<OpenAiError> {
+    const provider: SanitizedProviderError = {
+      operation,
+      status: response.status,
+      requestId: sanitizeIdentifier(response.headers.get("x-request-id"), 128),
+      type: null,
+      code: null,
+      message: null,
+      transportErrorName: null,
+      transportMessage: null,
+      responseContentType: sanitizeContentType(response.headers.get("content-type")),
+      responseBodyBytes: null,
+      responseBodyFormat: null,
+    };
+
+    try {
+      const bodyResult = await readProviderErrorBody(response);
+      provider.responseBodyBytes = bodyResult.bytes;
+      provider.responseBodyFormat = bodyResult.format;
+      if (bodyResult.value) {
+        const error = asProviderErrorRecord(bodyResult.value);
+        provider.type = sanitizeIdentifier(error?.type, 64);
+        provider.code = sanitizeIdentifier(error?.code, 64);
+        provider.message = sanitizeProviderMessage(error?.message);
+      }
+    } catch {
+      provider.responseBodyFormat = "read_error";
+    }
+    return new OpenAiError(provider);
+  }
+
+  static fromTransport(
+    error: unknown,
+    operation: SanitizedProviderError["operation"],
+  ): OpenAiError {
+    const record =
+      typeof error === "object" && error !== null
+        ? (error as { name?: unknown; message?: unknown })
+        : {};
+    return new OpenAiError({
+      ...emptyProviderError(),
+      operation,
+      transportErrorName: sanitizeIdentifier(record.name, 64),
+      transportMessage: sanitizeProviderMessage(record.message),
+    });
+  }
+}
+
+function emptyProviderError(): SanitizedProviderError {
+  return {
+    operation: "responses",
+    status: null,
+    requestId: null,
+    type: null,
+    code: null,
+    message: null,
+    transportErrorName: null,
+    transportMessage: null,
+    responseContentType: null,
+    responseBodyBytes: null,
+    responseBodyFormat: null,
+  };
+}
+
+interface ProviderErrorBodyResult {
+  value: unknown;
+  bytes: number;
+  format: NonNullable<SanitizedProviderError["responseBodyFormat"]>;
+}
+
+async function readProviderErrorBody(response: Response): Promise<ProviderErrorBodyResult> {
+  if (!response.body) return { value: null, bytes: 0, format: "empty" };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_PROVIDER_ERROR_BYTES) {
+      await reader.cancel();
+      return { value: null, bytes: total, format: "too_large" };
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+
+  try {
+    const value: unknown = JSON.parse(text);
+    return {
+      value,
+      bytes: total,
+      format: asProviderErrorRecord(value) ? "json_error" : "json_other",
+    };
+  } catch {
+    return {
+      value: null,
+      bytes: total,
+      format: text.trim() ? "invalid_json" : "empty",
+    };
+  }
+}
+
+function sanitizeContentType(value: string | null): string | null {
+  if (!value) return null;
+  const mediaType = value.split(";", 1)[0].trim().toLowerCase();
+  return /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mediaType) ? mediaType : null;
+}
+
+function asProviderErrorRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const error = (value as Record<string, unknown>).error;
+  return typeof error === "object" && error !== null && !Array.isArray(error)
+    ? (error as Record<string, unknown>)
+    : null;
+}
+
+function sanitizeIdentifier(value: unknown, maximumLength: number): string | null {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._:-]+$/.test(value)) return null;
+  return value.slice(0, maximumLength);
+}
+
+function sanitizeProviderMessage(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, "[REDACTED]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized ? normalized.slice(0, 300) : null;
+}
+
+function logProviderError(requestId: string, error: OpenAiError): void {
+  console.error("OpenAI request failed", {
+    requestId,
+    providerOperation: error.provider.operation,
+    providerStatus: error.provider.status,
+    providerRequestId: error.provider.requestId,
+    providerErrorType: error.provider.type,
+    providerErrorCode: error.provider.code,
+    transportErrorName: error.provider.transportErrorName,
+    responseContentType: error.provider.responseContentType,
+    responseBodyBytes: error.provider.responseBodyBytes,
+    responseBodyFormat: error.provider.responseBodyFormat,
+  });
+}
+
+function classifyOpenAiError(error: OpenAiError): { code: string; message: string } {
+  const code = error.provider.code?.toLowerCase();
+  const type = error.provider.type?.toLowerCase();
+  if (error.provider.status === 401 || type === "authentication_error") {
+    return {
+      code: "provider_auth_error",
+      message: "Vision provider authentication failed",
+    };
+  }
+  if (
+    error.provider.status === 429 &&
+    (code === "insufficient_quota" || type === "insufficient_quota")
+  ) {
+    return {
+      code: "provider_quota_exceeded",
+      message: "Vision provider quota is unavailable",
+    };
+  }
+  if (code === "model_not_found" || code === "model_not_available") {
+    return {
+      code: "provider_model_unavailable",
+      message: "Configured vision model is unavailable",
+    };
+  }
+  return { code: "upstream_error", message: "Vision processing failed" };
+}
+
 class OpenAiTimeoutError extends Error {}

@@ -65,11 +65,21 @@ Errors have a stable shape and do not include image contents or provider respons
 
 Relevant statuses are `400`, `403`, `405`, `413`, `415`, `429`, `502`, `503`, and `504`.
 
+Safe provider-facing error codes include `provider_auth_error`, `provider_quota_exceeded`, and
+`provider_model_unavailable`; all other provider failures remain `upstream_error`.
+
 ## Privacy and cost controls
 
-- The Worker does not persist the upload or extracted screenplay and sends it only to OpenAI for
-  processing. The OpenAI Responses request sets `store: false`.
+- The Worker does not persist the upload or extracted screenplay. Responses requests set
+  `store: false`. Images up to 5 MiB are sent inline; larger images are uploaded with OpenAI's
+  `vision` file purpose to avoid base64 transport expansion, referenced once, and immediately
+  deleted. The file also receives a one-hour expiration as a cleanup backstop. A failed deletion
+  fails the API request rather than reporting success.
 - Application code does not log request bodies, image data, screenplay text, or OpenAI responses.
+  Provider failures log only the endpoint operation, HTTP status, provider request ID, validated
+  error type/code, transport error class, and response-format metadata. Bounded redacted messages
+  are retained only inside the request's internal error object and are not logged. Logs never
+  include request bodies, image data, Authorization, model output, or arbitrary provider responses.
   Cloudflare invocation metadata can still include timestamps, status codes, and request metadata.
 - `OPENAI_API_KEY` exists only as a Worker secret. Never ship it or a shared API secret in
   LineReader.

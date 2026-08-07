@@ -30,7 +30,7 @@ export const screenplayJsonSchema = {
     characters: {
       type: "array",
       description: "Character names in order of first appearance. Excludes headings and directions.",
-      items: { type: "string", minLength: 1 },
+      items: { type: "string" },
     },
     items: {
       type: "array",
@@ -42,9 +42,9 @@ export const screenplayJsonSchema = {
         properties: {
           order: { type: "integer", minimum: 1 },
           speaker: {
-            anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
+            anyOf: [{ type: "string" }, { type: "null" }],
           },
-          text: { type: "string", minLength: 1 },
+          text: { type: "string" },
           isStageDirection: { type: "boolean" },
           confidence: { type: "number", minimum: 0, maximum: 1 },
         },
@@ -58,7 +58,7 @@ export const screenplayJsonSchema = {
         overallConfidence: { type: "number", minimum: 0, maximum: 1 },
         warnings: {
           type: "array",
-          items: { type: "string", minLength: 1 },
+          items: { type: "string" },
         },
       },
     },
