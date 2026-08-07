@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { FixedWindowRateLimiter, handleRequest, type Env } from "../src/index";
+import {
+  evaluateRateWindows,
+  handleRequest,
+  type Env,
+  type RateWindow,
+} from "../src/index";
 
 const pngBytes = Uint8Array.from(
   atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlKz1sAAAAASUVORK5CYII="),
@@ -163,11 +168,36 @@ describe("POST screenplay import", () => {
     });
   });
 
-  it("enforces the bounded per-client rate limit", async () => {
+  it("enforces the durable per-client rate limit", async () => {
     const testEnv = { ...env, RATE_LIMIT_REQUESTS: "1" };
-    const limiter = new FixedWindowRateLimiter();
     const openAiFetch = vi.fn(async () => openAiResponse(waiterImport));
-    const deps = { fetch: openAiFetch as typeof fetch, limiter, now: () => 1_000 };
+    let globalWindow: RateWindow | undefined;
+    let clientWindow: RateWindow | undefined;
+    const deps = {
+      fetch: openAiFetch as typeof fetch,
+      takeRateLimit: async (
+        _env: Env,
+        _clientAddress: string,
+        clientLimit: number,
+        globalLimit: number,
+        windowSeconds: number,
+      ) => {
+        const result = evaluateRateWindows(
+          globalWindow,
+          clientWindow,
+          globalLimit,
+          clientLimit,
+          windowSeconds * 1_000,
+          1_000,
+        );
+        globalWindow = result.globalWindow;
+        clientWindow = result.clientWindow;
+        return {
+          allowed: result.allowed,
+          retryAfterSeconds: result.retryAfterSeconds,
+        };
+      },
+    };
 
     expect((await handleRequest(createRequest(), testEnv, deps)).status).toBe(200);
     const second = await handleRequest(createRequest(), testEnv, deps);
@@ -176,6 +206,19 @@ describe("POST screenplay import", () => {
       error: { code: "rate_limited" },
     });
     expect(openAiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when the durable rate limiter is unavailable", async () => {
+    const openAiFetch = vi.fn();
+    const response = await handleRequest(createRequest(), env, {
+      fetch: openAiFetch as typeof fetch,
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "rate_limit_unavailable" },
+    });
+    expect(openAiFetch).not.toHaveBeenCalled();
   });
 
   it("allows configured browser origins and rejects all others", async () => {
@@ -198,6 +241,40 @@ describe("POST screenplay import", () => {
       dependencies(vi.fn()),
     );
     expect(rejectedResponse.status).toBe(403);
+  });
+
+  describe("durable rate-window evaluation", () => {
+    it("coordinates a global budget across clients and resets deterministically", () => {
+      let globalWindow: RateWindow | undefined;
+      let clientA: RateWindow | undefined;
+      let clientB: RateWindow | undefined;
+
+      const first = evaluateRateWindows(globalWindow, clientA, 2, 2, 60_000, 1_000);
+      globalWindow = first.globalWindow;
+      clientA = first.clientWindow;
+      expect(first.allowed).toBe(true);
+
+      const second = evaluateRateWindows(globalWindow, clientB, 2, 2, 60_000, 1_000);
+      globalWindow = second.globalWindow;
+      clientB = second.clientWindow;
+      expect(second.allowed).toBe(true);
+
+      const blocked = evaluateRateWindows(globalWindow, clientA, 2, 2, 60_000, 1_000);
+      expect(blocked.allowed).toBe(false);
+      expect(blocked.retryAfterSeconds).toBe(60);
+
+      const reset = evaluateRateWindows(
+        blocked.globalWindow,
+        blocked.clientWindow,
+        2,
+        2,
+        60_000,
+        61_000,
+      );
+      expect(reset.allowed).toBe(true);
+      expect(reset.globalWindow.count).toBe(1);
+      expect(reset.clientWindow.count).toBe(1);
+    });
   });
 
   it("does not expose the handler on unconfigured paths", async () => {
@@ -230,8 +307,7 @@ function multipartRequest(form: FormData, origin?: string): Request {
 function dependencies(openAiFetch: ReturnType<typeof vi.fn>) {
   return {
     fetch: openAiFetch as typeof fetch,
-    limiter: new FixedWindowRateLimiter(),
-    now: () => 1_000,
+    takeRateLimit: async () => ({ allowed: true, retryAfterSeconds: 0 }),
   };
 }
 

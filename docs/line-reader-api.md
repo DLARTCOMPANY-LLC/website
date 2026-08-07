@@ -75,11 +75,11 @@ Relevant statuses are `400`, `403`, `405`, `413`, `415`, `429`, `502`, `503`, an
   LineReader.
 - One image, byte limits, a configurable output-token ceiling, an upstream timeout, and an
   isolate-local concurrency ceiling bound each request's cost.
-- The included rate limiter is a bounded, per-isolate in-memory fallback. It prevents unbounded
-  memory growth but is **not globally durable**: limits can reset on isolate restart and are not
-  coordinated across Cloudflare locations. Before broad public launch, configure a Cloudflare WAF
-  rate-limiting rule for `POST /v1/screenplays/import` (or replace the fallback with a Durable
-  Object). Do not treat the fallback as a billing cap.
+- A SQLite-backed Cloudflare Durable Object atomically enforces both the configurable per-IP budget
+  (`RATE_LIMIT_REQUESTS`) and a global budget (`GLOBAL_RATE_LIMIT_REQUESTS`) in each
+  `RATE_LIMIT_WINDOW_SECONDS` window. All edge locations coordinate through one named object.
+  Expired client records are deleted, and client IP addresses are SHA-256 hashed before entering
+  durable storage. The endpoint fails closed without a healthy `RATE_LIMITER` binding.
 - Native clients generally omit `Origin` and are accepted. Browser requests are accepted only when
   their exact origin is listed in `CORS_ALLOWED_ORIGINS`; an empty list rejects all browser origins.
   CORS is not authentication.
@@ -98,6 +98,8 @@ Required secret:
 Optional variables are documented in `.dev.vars.example`. The default model is
 `gpt-4.1-mini`; set `OPENAI_VISION_MODEL` to another Responses API model that supports image input
 and strict JSON Schema outputs. `CORS_ALLOWED_ORIGINS` is a comma-separated exact allowlist.
+`RATE_LIMIT_REQUESTS` defaults to 10 requests per client per 60 seconds, while
+`GLOBAL_RATE_LIMIT_REQUESTS` defaults to 100 total requests in the same durable global window.
 
 Local setup:
 
@@ -114,6 +116,8 @@ npx wrangler login
 npx wrangler secret put OPENAI_API_KEY
 npm run api:deploy
 ```
+
+The `v1` Wrangler migration creates the SQLite-backed `RateLimiter` Durable Object on first deploy.
 
 The deployment prints the assigned `workers.dev` URL. No Worker deployment URL is configured in
 this repository yet. After deployment, use

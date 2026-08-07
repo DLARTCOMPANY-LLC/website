@@ -4,6 +4,20 @@
   "main": "api/src/index.ts",
   "compatibility_date": "2026-08-07",
   "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RATE_LIMITER",
+        "class_name": "RateLimiter"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RateLimiter"]
+    }
+  ],
   "observability": {
     "enabled": true,
     "logs": {
@@ -15,6 +29,7 @@
     "OPENAI_VISION_MODEL": "gpt-4.1-mini",
     "CORS_ALLOWED_ORIGINS": "",
     "RATE_LIMIT_REQUESTS": "10",
+    "GLOBAL_RATE_LIMIT_REQUESTS": "100",
     "RATE_LIMIT_WINDOW_SECONDS": "60",
     "MAX_CONCURRENT_REQUESTS": "4",
     "OPENAI_TIMEOUT_MS": "45000",

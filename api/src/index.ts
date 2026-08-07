@@ -4,20 +4,27 @@ import {
   validateModelImport,
   type ScreenplayImport,
 } from "./schema";
+import type {
+  DurableObjectNamespace,
+  DurableObjectState,
+} from "@cloudflare/workers-types";
 
 const MAX_REQUEST_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TITLE_LENGTH = 200;
 const MAX_IMAGE_DIMENSION = 20_000;
 const MAX_IMAGE_PIXELS = 40_000_000;
-const MAX_RATE_LIMIT_KEYS = 10_000;
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const RATE_LIMITER_INSTANCE = "screenplay-import-global-v1";
+const RATE_LIMITER_URL = "https://rate-limiter.internal/check";
 
 export interface Env {
   OPENAI_API_KEY?: string;
+  RATE_LIMITER?: DurableObjectNamespace;
   OPENAI_VISION_MODEL?: string;
   CORS_ALLOWED_ORIGINS?: string;
   RATE_LIMIT_REQUESTS?: string;
+  GLOBAL_RATE_LIMIT_REQUESTS?: string;
   RATE_LIMIT_WINDOW_SECONDS?: string;
   MAX_CONCURRENT_REQUESTS?: string;
   OPENAI_TIMEOUT_MS?: string;
@@ -26,46 +33,19 @@ export interface Env {
 
 interface HandlerDependencies {
   fetch: typeof fetch;
-  limiter: FixedWindowRateLimiter;
-  now: () => number;
+  takeRateLimit: typeof takeDurableRateLimit;
 }
 
-interface RateEntry {
+export interface RateWindow {
   count: number;
   resetAt: number;
 }
 
-export class FixedWindowRateLimiter {
-  private readonly entries = new Map<string, RateEntry>();
-
-  constructor(private readonly maxKeys = MAX_RATE_LIMIT_KEYS) {}
-
-  take(key: string, limit: number, windowMs: number, now: number): RateEntry | null {
-    const current = this.entries.get(key);
-    if (current && current.resetAt > now) {
-      if (current.count >= limit) return null;
-      current.count += 1;
-      return current;
-    }
-
-    if (!current && this.entries.size >= this.maxKeys) {
-      this.removeExpired(now);
-      if (this.entries.size >= this.maxKeys) return null;
-    }
-
-    const next = { count: 1, resetAt: now + windowMs };
-    this.entries.set(key, next);
-    return next;
-  }
-
-  private removeExpired(now: number): void {
-    for (const [key, entry] of this.entries) {
-      if (entry.resetAt <= now) this.entries.delete(key);
-    }
-  }
+interface RateLimitDecision {
+  allowed: boolean;
+  retryAfterSeconds: number;
 }
 
-const limiter = new FixedWindowRateLimiter();
 let activeOpenAiRequests = 0;
 
 export default {
@@ -77,12 +57,10 @@ export default {
 export async function handleRequest(
   request: Request,
   env: Env,
-  dependencies: HandlerDependencies = {
-    fetch,
-    limiter,
-    now: Date.now,
-  },
+  dependencies: Partial<HandlerDependencies> = {},
 ): Promise<Response> {
+  const fetchImplementation = dependencies.fetch ?? fetch;
+  const takeRateLimit = dependencies.takeRateLimit ?? takeDurableRateLimit;
   const requestId = crypto.randomUUID();
   const cors = resolveCors(request, env);
   const pathname = new URL(request.url).pathname.replace(/\/+$/, "");
@@ -138,18 +116,33 @@ export async function handleRequest(
   }
 
   const rateLimit = positiveInteger(env.RATE_LIMIT_REQUESTS, 10, 1, 60);
+  const globalRateLimit = positiveInteger(env.GLOBAL_RATE_LIMIT_REQUESTS, 100, 1, 10_000);
   const windowSeconds = positiveInteger(env.RATE_LIMIT_WINDOW_SECONDS, 60, 1, 3_600);
-  const now = dependencies.now();
-  const rateEntry = dependencies.limiter.take(
-    request.headers.get("cf-connecting-ip") ?? "unknown",
-    rateLimit,
-    windowSeconds * 1_000,
-    now,
-  );
-  if (!rateEntry) {
+  let rateDecision: RateLimitDecision;
+  try {
+    rateDecision = await takeRateLimit(
+      env,
+      request.headers.get("cf-connecting-ip") ?? "unknown",
+      rateLimit,
+      globalRateLimit,
+      windowSeconds,
+    );
+  } catch {
+    return withCors(
+      errorResponse(
+        503,
+        "rate_limit_unavailable",
+        "Screenplay import rate limiting is unavailable",
+        requestId,
+        { "Retry-After": "30" },
+      ),
+      cors,
+    );
+  }
+  if (!rateDecision.allowed) {
     return withCors(
       errorResponse(429, "rate_limited", "Too many screenplay imports", requestId, {
-        "Retry-After": String(windowSeconds),
+        "Retry-After": String(rateDecision.retryAfterSeconds),
       }),
       cors,
     );
@@ -173,11 +166,192 @@ export async function handleRequest(
       contentType,
       requestId,
       cors,
-      dependencies.fetch,
+      fetchImplementation,
     );
   } finally {
     activeOpenAiRequests -= 1;
   }
+}
+
+export interface RateWindowEvaluation {
+  allowed: boolean;
+  retryAfterSeconds: number;
+  globalWindow: RateWindow;
+  clientWindow: RateWindow;
+}
+
+export function evaluateRateWindows(
+  globalWindow: RateWindow | undefined,
+  clientWindow: RateWindow | undefined,
+  globalLimit: number,
+  clientLimit: number,
+  windowMs: number,
+  now: number,
+): RateWindowEvaluation {
+  const nextGlobal =
+    !globalWindow || globalWindow.resetAt <= now
+      ? { count: 0, resetAt: now + windowMs }
+      : globalWindow;
+  const nextClient =
+    !clientWindow || clientWindow.resetAt <= now
+      ? { count: 0, resetAt: now + windowMs }
+      : clientWindow;
+  const blockedUntil = Math.max(
+    nextGlobal.count >= globalLimit ? nextGlobal.resetAt : now,
+    nextClient.count >= clientLimit ? nextClient.resetAt : now,
+  );
+
+  if (blockedUntil > now) {
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((blockedUntil - now) / 1_000)),
+      globalWindow: nextGlobal,
+      clientWindow: nextClient,
+    };
+  }
+
+  return {
+    allowed: true,
+    retryAfterSeconds: 0,
+    globalWindow: { ...nextGlobal, count: nextGlobal.count + 1 },
+    clientWindow: { ...nextClient, count: nextClient.count + 1 },
+  };
+}
+
+export class RateLimiter {
+  constructor(private readonly state: DurableObjectState) {
+    state.blockConcurrencyWhile(async () => {
+      state.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS rate_windows (
+          key TEXT PRIMARY KEY,
+          count INTEGER NOT NULL,
+          reset_at INTEGER NOT NULL
+        )
+      `);
+    });
+  }
+
+  fetch(request: Request): Response {
+    if (request.method !== "POST" || new URL(request.url).pathname !== "/check") {
+      return new Response(null, { status: 404 });
+    }
+
+    const clientKey = request.headers.get("X-Rate-Limit-Key");
+    const clientLimit = parseInternalPositiveInteger(
+      request.headers.get("X-Client-Limit"),
+      60,
+    );
+    const globalLimit = parseInternalPositiveInteger(
+      request.headers.get("X-Global-Limit"),
+      10_000,
+    );
+    const windowMs = parseInternalPositiveInteger(
+      request.headers.get("X-Window-Ms"),
+      3_600_000,
+    );
+    if (!clientKey || !/^[a-f0-9]{64}$/.test(clientKey) || !clientLimit || !globalLimit || !windowMs) {
+      return new Response(null, { status: 400 });
+    }
+
+    const now = Date.now();
+    const decision = this.state.storage.transactionSync(() => {
+      const sql = this.state.storage.sql;
+      sql.exec("DELETE FROM rate_windows WHERE reset_at <= ?", now);
+      const globalWindow = readRateWindow(sql, "global");
+      const clientWindow = readRateWindow(sql, `client:${clientKey}`);
+      const evaluated = evaluateRateWindows(
+        globalWindow,
+        clientWindow,
+        globalLimit,
+        clientLimit,
+        windowMs,
+        now,
+      );
+      if (evaluated.allowed) {
+        writeRateWindow(sql, "global", evaluated.globalWindow);
+        writeRateWindow(sql, `client:${clientKey}`, evaluated.clientWindow);
+      }
+      return evaluated;
+    });
+
+    return jsonResponse(
+      200,
+      { allowed: decision.allowed, retryAfterSeconds: decision.retryAfterSeconds },
+      { "Cache-Control": "no-store" },
+    );
+  }
+}
+
+async function takeDurableRateLimit(
+  env: Env,
+  clientAddress: string,
+  clientLimit: number,
+  globalLimit: number,
+  windowSeconds: number,
+): Promise<RateLimitDecision> {
+  if (!env.RATE_LIMITER) throw new Error("RATE_LIMITER binding is unavailable");
+
+  const clientKey = await sha256(clientAddress);
+  const id = env.RATE_LIMITER.idFromName(RATE_LIMITER_INSTANCE);
+  const response = await env.RATE_LIMITER.get(id).fetch(RATE_LIMITER_URL, {
+    method: "POST",
+    headers: {
+      "X-Rate-Limit-Key": clientKey,
+      "X-Client-Limit": String(clientLimit),
+      "X-Global-Limit": String(globalLimit),
+      "X-Window-Ms": String(windowSeconds * 1_000),
+    },
+  });
+  if (!response.ok) throw new Error("Durable rate limiter rejected the request");
+
+  const value: unknown = await response.json();
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof (value as Record<string, unknown>).allowed !== "boolean" ||
+    !Number.isInteger((value as Record<string, unknown>).retryAfterSeconds) ||
+    ((value as Record<string, unknown>).retryAfterSeconds as number) < 0
+  ) {
+    throw new Error("Durable rate limiter returned an invalid response");
+  }
+  return value as RateLimitDecision;
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function readRateWindow(sql: DurableObjectState["storage"]["sql"], key: string): RateWindow | undefined {
+  const row = sql
+    .exec<{ count: number; reset_at: number }>(
+      "SELECT count, reset_at FROM rate_windows WHERE key = ?",
+      key,
+    )
+    .toArray()[0];
+  return row ? { count: row.count, resetAt: row.reset_at } : undefined;
+}
+
+function writeRateWindow(
+  sql: DurableObjectState["storage"]["sql"],
+  key: string,
+  window: RateWindow,
+): void {
+  sql.exec(
+    `INSERT INTO rate_windows (key, count, reset_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET count = excluded.count, reset_at = excluded.reset_at`,
+    key,
+    window.count,
+    window.resetAt,
+  );
+}
+
+function parseInternalPositiveInteger(value: string | null, maximum: number): number | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= maximum ? parsed : null;
 }
 
 async function processImport(
