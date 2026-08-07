@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "id": "jpeg-complex-phone-photo",
+  "description": "Simulated phone photo with perspective skew, shadow, chrome, and margin notes.",
+  "image": "phone-perspective.jpg",
+  "mediaType": "image/jpeg",
+  "complexity": "complex",
+  "provenance": {
+    "kind": "synthetic",
+    "generator": "api/test/fixtures/ocr/generate.mjs",
+    "textOwnership": "Original test text authored for this repository",
+    "thirdPartyContent": false
+  },
+  "expected": {
+    "characters": [
+      "Casey",
+      "Guard"
+    ],
+    "items": [
+      {
+        "speaker": null,
+        "text": "INT. SERVICE CORRIDOR - CONTINUOUS",
+        "isStageDirection": true
+      },
+      {
+        "speaker": null,
+        "text": "CASEY steadies a half-open equipment case.",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Casey",
+        "text": "We need the pre-check list—\nnot yesterday's draft.",
+        "isStageDirection": false
+      },
+      {
+        "speaker": null,
+        "text": "(off the radio)",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Guard",
+        "text": "Understood. Gate C is clear.",
+        "isStageDirection": false
+      }
+    ]
+  },
+  "excludedArtifacts": [
+    {
+      "text": "page_07.jpg",
+      "kind": "viewer_chrome"
+    },
+    {
+      "text": "START",
+      "kind": "handwritten_annotation"
+    },
+    {
+      "text": "END",
+      "kind": "handwritten_annotation"
+    },
+    {
+      "text": "redo?",
+      "kind": "handwritten_annotation"
+    },
+    {
+      "text": "*",
+      "kind": "margin_revision_mark"
+    }
+  ],
+  "allowedNormalization": [
+    "line_endings",
+    "outer_whitespace"
+  ],
+  "thresholds": {
+    "fieldAccuracy": 1,
+    "characterAccuracy": 1,
+    "speakerAccuracy": 1,
+    "dialogueTextAccuracy": 0.9,
+    "directionTextAccuracy": 0.86,
+    "maxDialogueOmissions": 0,
+    "maxArtifactFalsePositives": 0,
+    "minimumConfidence": 0.65,
+    "maxLatencyMs": 90000
+  }
+}

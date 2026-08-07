@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "id": "png-moderate-parenthetical",
+  "description": "Wrapped dialogue with leading and interstitial screenplay parentheticals.",
+  "image": "wrapped-parenthetical.png",
+  "mediaType": "image/png",
+  "complexity": "moderate",
+  "provenance": {
+    "kind": "synthetic",
+    "generator": "api/test/fixtures/ocr/generate.mjs",
+    "textOwnership": "Original test text authored for this repository",
+    "thirdPartyContent": false
+  },
+  "expected": {
+    "characters": [
+      "Maya",
+      "Theo"
+    ],
+    "items": [
+      {
+        "speaker": null,
+        "text": "INT. EMPTY STAGE - NIGHT",
+        "isStageDirection": true
+      },
+      {
+        "speaker": null,
+        "text": "(softly)",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Maya",
+        "text": "The paper lantern is still\nglowing near the back wall.",
+        "isStageDirection": false
+      },
+      {
+        "speaker": "Theo",
+        "text": "I can see it.",
+        "isStageDirection": false
+      },
+      {
+        "speaker": null,
+        "text": "(then; to Maya)",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Theo",
+        "text": "Don't switch it off yet.",
+        "isStageDirection": false
+      }
+    ]
+  },
+  "excludedArtifacts": [],
+  "allowedNormalization": [
+    "line_endings",
+    "outer_whitespace"
+  ],
+  "thresholds": {
+    "fieldAccuracy": 1,
+    "characterAccuracy": 1,
+    "speakerAccuracy": 1,
+    "dialogueTextAccuracy": 0.98,
+    "directionTextAccuracy": 0.92,
+    "maxDialogueOmissions": 0,
+    "maxArtifactFalsePositives": 0,
+    "minimumConfidence": 0.8,
+    "maxLatencyMs": 60000
+  }
+}

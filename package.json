@@ -10,6 +10,9 @@
     "check": "astro check",
     "api:dev": "wrangler dev",
     "api:test": "vitest run api/test",
+    "api:fixtures:generate": "node api/test/fixtures/ocr/generate.mjs",
+    "api:fixtures:test": "vitest run api/test/fixture-contract.test.ts",
+    "api:eval:live": "node api/test/live-eval.mjs",
     "api:typecheck": "tsc --project api/tsconfig.json --noEmit",
     "api:deploy": "wrangler deploy"
   },
@@ -24,6 +27,8 @@
   "devDependencies": {
     "@astrojs/check": "^0.9.5",
     "@cloudflare/workers-types": "^5.20260804.1",
+    "@types/node": "^26.2.0",
+    "sharp": "^0.35.3",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.120.0"

@@ -122,6 +122,18 @@ Dialogue is never modified by this guard. At published standard pricing, GPT-5.6
 million input tokens and $30 per million output tokens; image tokens count as input, and reasoning
 tokens count toward the configured output-token ceiling.
 
+### Synthetic OCR fixture suite
+
+`api/test/fixtures/ocr/` contains a six-case PNG/JPEG matrix across simple, moderate, and complex
+screenplay layouts. All text and images are original generated test assets; the user-provided actor
+image and third-party screenplay content are not included. Machine-readable manifests define ordered
+expected output, excluded UI/annotations, permitted normalization, and quality thresholds.
+
+`npm run api:fixtures:test` is deterministic and runs without OpenAI. `npm run api:eval:live` is a
+separate billable evaluator that refuses to start unless `RUN_LIVE_OCR_EVAL=1`, `OPENAI_API_KEY`, and
+an explicit `OCR_EVAL_TARGET` are present. The key serves only as billing acknowledgement and is never
+transmitted or printed by the runner. See `api/test/fixtures/ocr/README.md` for metrics and usage.
+
 Local setup:
 
 ```bash

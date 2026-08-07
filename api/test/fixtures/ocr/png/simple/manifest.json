@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "png-simple-clean",
+  "description": "Clean typeset screenplay with punctuation and a printed action line.",
+  "image": "clean-screenplay.png",
+  "mediaType": "image/png",
+  "complexity": "simple",
+  "provenance": {
+    "kind": "synthetic",
+    "generator": "api/test/fixtures/ocr/generate.mjs",
+    "textOwnership": "Original test text authored for this repository",
+    "thirdPartyContent": false
+  },
+  "expected": {
+    "characters": [
+      "Nora",
+      "Alex"
+    ],
+    "items": [
+      {
+        "speaker": null,
+        "text": "INT. TEST KITCHEN - DAY",
+        "isStageDirection": true
+      },
+      {
+        "speaker": null,
+        "text": "A timer rings. NORA checks the blue-green tray.",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Nora",
+        "text": "It's ready—right on time.",
+        "isStageDirection": false
+      },
+      {
+        "speaker": "Alex",
+        "text": "Then don't re-label it.",
+        "isStageDirection": false
+      }
+    ]
+  },
+  "excludedArtifacts": [],
+  "allowedNormalization": [
+    "line_endings",
+    "outer_whitespace"
+  ],
+  "thresholds": {
+    "fieldAccuracy": 1,
+    "characterAccuracy": 1,
+    "speakerAccuracy": 1,
+    "dialogueTextAccuracy": 0.98,
+    "directionTextAccuracy": 0.92,
+    "maxDialogueOmissions": 0,
+    "maxArtifactFalsePositives": 0,
+    "minimumConfidence": 0.8,
+    "maxLatencyMs": 90000
+  }
+}

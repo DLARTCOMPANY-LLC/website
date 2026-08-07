@@ -202,10 +202,18 @@ describe("POST screenplay import", () => {
         {
           ...waiterImport.items[2],
           order: 2,
+          speaker: null,
+          text: "*",
+          isStageDirection: true,
+          isArtifact: false,
+        },
+        {
+          ...waiterImport.items[2],
+          order: 3,
           text: "You couldn't leave—could you?",
         },
         {
-          order: 3,
+          order: 4,
           speaker: null,
           text: "handwritten arrow",
           isStageDirection: true,
@@ -214,11 +222,11 @@ describe("POST screenplay import", () => {
         },
         {
           ...waiterImport.items[4],
-          order: 4,
+          order: 5,
           text: "Not from me.\n(then; to Spencer)\nYou ready?",
         },
         {
-          order: 5,
+          order: 6,
           speaker: null,
           text: "END",
           isStageDirection: true,

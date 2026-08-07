@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "png-complex-viewer-artifacts",
+  "description": "Viewer chrome, margin revision marks, and handwritten-style START/END overlays.",
+  "image": "viewer-chrome-marks.png",
+  "mediaType": "image/png",
+  "complexity": "complex",
+  "provenance": {
+    "kind": "synthetic",
+    "generator": "api/test/fixtures/ocr/generate.mjs",
+    "textOwnership": "Original test text authored for this repository",
+    "thirdPartyContent": false
+  },
+  "expected": {
+    "characters": [
+      "Captain Vale",
+      "Lee"
+    ],
+    "items": [
+      {
+        "speaker": null,
+        "text": "EXT. TRAIN PLATFORM - DAWN",
+        "isStageDirection": true
+      },
+      {
+        "speaker": null,
+        "text": "CAPTAIN VALE folds a weather-stained map.",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Captain Vale",
+        "text": "Keep the north gate clear.",
+        "isStageDirection": false
+      },
+      {
+        "speaker": null,
+        "text": "(checking the clock)",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Lee",
+        "text": "Two minutes—no more.",
+        "isStageDirection": false
+      }
+    ]
+  },
+  "excludedArtifacts": [
+    {
+      "text": "Role: CAPTAIN VALE",
+      "kind": "viewer_chrome"
+    },
+    {
+      "text": "START",
+      "kind": "handwritten_annotation"
+    },
+    {
+      "text": "END",
+      "kind": "handwritten_annotation"
+    },
+    {
+      "text": "*",
+      "kind": "margin_revision_mark"
+    }
+  ],
+  "allowedNormalization": [
+    "line_endings",
+    "outer_whitespace"
+  ],
+  "thresholds": {
+    "fieldAccuracy": 1,
+    "characterAccuracy": 1,
+    "speakerAccuracy": 1,
+    "dialogueTextAccuracy": 0.96,
+    "directionTextAccuracy": 0.9,
+    "maxDialogueOmissions": 0,
+    "maxArtifactFalsePositives": 0,
+    "minimumConfidence": 0.75,
+    "maxLatencyMs": 60000
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "jpeg-moderate-low-contrast",
+  "description": "Low-contrast page under simulated uneven warm lighting.",
+  "image": "low-contrast-lighting.jpg",
+  "mediaType": "image/jpeg",
+  "complexity": "moderate",
+  "provenance": {
+    "kind": "synthetic",
+    "generator": "api/test/fixtures/ocr/generate.mjs",
+    "textOwnership": "Original test text authored for this repository",
+    "thirdPartyContent": false
+  },
+  "expected": {
+    "characters": [
+      "Eli",
+      "Rosa"
+    ],
+    "items": [
+      {
+        "speaker": null,
+        "text": "INT. REHEARSAL HALL - LATE AFTERNOON",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Eli",
+        "text": "The left-hand door sticks\nwhen the room gets cold.",
+        "isStageDirection": false
+      },
+      {
+        "speaker": "Rosa",
+        "text": "I'll mark it.",
+        "isStageDirection": false
+      },
+      {
+        "speaker": null,
+        "text": "(after a beat)",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "Rosa",
+        "text": "But we test it twice.",
+        "isStageDirection": false
+      }
+    ]
+  },
+  "excludedArtifacts": [],
+  "allowedNormalization": [
+    "line_endings",
+    "outer_whitespace"
+  ],
+  "thresholds": {
+    "fieldAccuracy": 1,
+    "characterAccuracy": 1,
+    "speakerAccuracy": 1,
+    "dialogueTextAccuracy": 0.94,
+    "directionTextAccuracy": 0.9,
+    "maxDialogueOmissions": 0,
+    "maxArtifactFalsePositives": 0,
+    "minimumConfidence": 0.7,
+    "maxLatencyMs": 60000
+  }
+}

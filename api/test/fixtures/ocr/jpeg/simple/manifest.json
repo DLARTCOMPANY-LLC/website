@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "jpeg-simple-punctuation",
+  "description": "Clean JPEG containing apostrophes, quotation marks, and compound hyphens.",
+  "image": "punctuation-dialogue.jpg",
+  "mediaType": "image/jpeg",
+  "complexity": "simple",
+  "provenance": {
+    "kind": "synthetic",
+    "generator": "api/test/fixtures/ocr/generate.mjs",
+    "textOwnership": "Original test text authored for this repository",
+    "thirdPartyContent": false
+  },
+  "expected": {
+    "characters": [
+      "June",
+      "Omar"
+    ],
+    "items": [
+      {
+        "speaker": null,
+        "text": "INT. PROP ROOM - MORNING",
+        "isStageDirection": true
+      },
+      {
+        "speaker": "June",
+        "text": "\"Don't move the blue-green crate.\"\nIt's camera-ready.",
+        "isStageDirection": false
+      },
+      {
+        "speaker": "Omar",
+        "text": "Copy that—hands off.",
+        "isStageDirection": false
+      }
+    ]
+  },
+  "excludedArtifacts": [],
+  "allowedNormalization": [
+    "line_endings",
+    "outer_whitespace"
+  ],
+  "thresholds": {
+    "fieldAccuracy": 1,
+    "characterAccuracy": 1,
+    "speakerAccuracy": 1,
+    "dialogueTextAccuracy": 0.98,
+    "directionTextAccuracy": 0.92,
+    "maxDialogueOmissions": 0,
+    "maxArtifactFalsePositives": 0,
+    "minimumConfidence": 0.8,
+    "maxLatencyMs": 60000
+  }
+}
