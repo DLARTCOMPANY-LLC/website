@@ -127,6 +127,7 @@ describe("POST screenplay import", () => {
 
     const response = await handleRequest(createRequest(), env, dependencies(openAiFetch));
     expect(response.status).toBe(200);
+    expect(response.headers.get("X-OCR-Model")).toBe("gpt-4.1-mini");
     const result = (await response.json()) as {
       title: string;
       characters: string[];

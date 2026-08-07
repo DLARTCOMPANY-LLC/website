@@ -414,6 +414,7 @@ async function processImport(
       jsonResponse(200, result, {
         "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff",
+        "X-OCR-Model": env.OPENAI_VISION_MODEL || "gpt-5.6-sol",
         "X-Request-Id": requestId,
       }),
       cors,

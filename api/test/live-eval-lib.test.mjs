@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   assertLiveEvaluationAuthorized,
+  assertPlannedRequestCount,
+  buildEvaluationPlan,
+  evaluationPassed,
+  parsedOutputHash,
   readLiveEvaluationRuns,
   scoreFixture,
+  summarizeEvaluation,
   thresholdFailures,
 } from "./live-eval-lib.mjs";
 
@@ -76,9 +81,18 @@ describe("live OCR evaluator scoring", () => {
       dialogueTextAccuracy: 1,
       directionTextAccuracy: 1,
       dialogueOmissions: 0,
+      dialogueSubstitutions: 0,
       artifactFalsePositives: 0,
+      speakerClassificationErrors: 0,
+      directionClassificationErrors: 0,
       confidence: 0.99,
       latencyMs: 500,
+      diff: {
+        expectedItemCount: 3,
+        actualItemCount: 3,
+        itemCountDelta: 0,
+        operations: [],
+      },
     });
     expect(thresholdFailures(manifest.thresholds, metrics)).toEqual([]);
   });
@@ -91,10 +105,24 @@ describe("live OCR evaluator scoring", () => {
     });
     const typoMetrics = scoreFixture(manifest, typo, 500);
     expect(typoMetrics.dialogueOmissions).toBe(0);
+    expect(typoMetrics.dialogueSubstitutions).toBe(1);
     expect(typoMetrics.dialogueTextAccuracy).toBeLessThan(1);
 
     const missing = response({ items: response().items.slice(0, 2) });
     expect(scoreFixture(manifest, missing, 500).dialogueOmissions).toBe(1);
+  });
+
+  it("aligns sequence shifts without inventing downstream substitutions or classification errors", () => {
+    const missingFirstTurn = response({ items: response().items.slice(1) });
+    const metrics = scoreFixture(manifest, missingFirstTurn, 500);
+
+    expect(metrics.dialogueOmissions).toBe(1);
+    expect(metrics.dialogueSubstitutions).toBe(0);
+    expect(metrics.speakerClassificationErrors).toBe(0);
+    expect(metrics.directionClassificationErrors).toBe(0);
+    expect(metrics.diff.operations).toEqual([
+      { operation: "delete", expectedIndex: 1, actualIndex: null },
+    ]);
   });
 
   it("detects isolated exact or bounded-fuzzy artifacts but not substrings", () => {
@@ -136,13 +164,89 @@ describe("live OCR evaluator scoring", () => {
   });
 
   it("bounds repeated evaluation runs", () => {
-    expect(readLiveEvaluationRuns({})).toBe(1);
+    expect(readLiveEvaluationRuns({})).toBe(3);
     expect(readLiveEvaluationRuns({ OCR_EVAL_RUNS: "3" })).toBe(3);
-    expect(() => readLiveEvaluationRuns({ OCR_EVAL_RUNS: "0" })).toThrow(
-      "integer from 1 to 5",
+    expect(readLiveEvaluationRuns({ OCR_EVAL_RUNS: "5" })).toBe(5);
+    expect(() => readLiveEvaluationRuns({ OCR_EVAL_RUNS: "1" })).toThrow(
+      "integer from 3 to 5",
     );
     expect(() => readLiveEvaluationRuns({ OCR_EVAL_RUNS: "6" })).toThrow(
-      "integer from 1 to 5",
+      "integer from 3 to 5",
     );
+  });
+
+  it("plans every fixture for three independent attempts and confirms exact billing", () => {
+    expect(buildEvaluationPlan(["a", "b"], 3)).toEqual([
+      { id: "a", run: 1 },
+      { id: "b", run: 1 },
+      { id: "a", run: 2 },
+      { id: "b", run: 2 },
+      { id: "a", run: 3 },
+      { id: "b", run: 3 },
+    ]);
+    expect(() => assertPlannedRequestCount({}, 18)).toThrow(
+      "OCR_EVAL_CONFIRM_REQUESTS=18",
+    );
+    expect(() =>
+      assertPlannedRequestCount({ OCR_EVAL_CONFIRM_REQUESTS: "17" }, 18),
+    ).toThrow("OCR_EVAL_CONFIRM_REQUESTS=18");
+    expect(
+      assertPlannedRequestCount({ OCR_EVAL_CONFIRM_REQUESTS: "18" }, 18),
+    ).toBeUndefined();
+  });
+
+  it("hashes parsed output canonically and reports one-of-three failure plus variance", () => {
+    const hash = parsedOutputHash({ b: 2, a: 1 });
+    expect(parsedOutputHash({ a: 1, b: 2 })).toBe(hash);
+    const attempts = [
+      {
+        id: "fixture",
+        run: 1,
+        passed: true,
+        outputHash: hash,
+        providerModel: "gpt-5.6-sol",
+        metrics: {
+          ...scoreFixture(manifest, response(), 400),
+        },
+      },
+      {
+        id: "fixture",
+        run: 2,
+        passed: false,
+        outputHash: parsedOutputHash({ a: 2 }),
+        providerModel: "gpt-5.6-sol",
+        metrics: {
+          ...scoreFixture(manifest, response(), 600),
+          confidence: 0.7,
+        },
+      },
+      {
+        id: "fixture",
+        run: 3,
+        passed: true,
+        outputHash: hash,
+        providerModel: "gpt-5.6-sol",
+        metrics: {
+          ...scoreFixture(manifest, response(), 500),
+        },
+      },
+    ];
+    const summaries = summarizeEvaluation(attempts, ["fixture"], 3);
+
+    expect(summaries[0]).toMatchObject({
+      attempts: 3,
+      requiredRuns: 3,
+      allRunsPresent: true,
+      allPassed: false,
+      uniqueOutputHashes: 2,
+      structurallyStable: false,
+      providerModels: ["gpt-5.6-sol"],
+      variance: {
+        itemCount: { min: 3, max: 3 },
+        confidence: { min: 0.7, max: 0.99 },
+        latencyMs: { min: 400, max: 600 },
+      },
+    });
+    expect(evaluationPassed(summaries)).toBe(false);
   });
 });
