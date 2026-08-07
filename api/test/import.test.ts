@@ -140,8 +140,17 @@ describe("POST screenplay import", () => {
       result.items
         .filter((item) => item.isStageDirection)
         .map((item) => item.text),
-    ).toEqual(["Role", "START", "END"]);
-    expect(result.items[4].text).toBe("(quietly)\nI already know what I want.");
+    ).toEqual(["Role", "START", "(quietly)", "END"]);
+    expect(result.items[4]).toMatchObject({
+      speaker: null,
+      text: "(quietly)",
+      isStageDirection: true,
+    });
+    expect(result.items[5]).toMatchObject({
+      speaker: "Mitch",
+      text: "I already know what I want.",
+      isStageDirection: false,
+    });
   });
 
   it("uses original image detail and bounded reasoning for GPT-5.6", async () => {
@@ -161,6 +170,9 @@ describe("POST screenplay import", () => {
       );
       expect(providerRequest.instructions).toContain(
         "Cross-check it against every spoken item",
+      );
+      expect(providerRequest.instructions).toContain(
+        "becomes three ordered items: Mitch dialogue, direction, Mitch dialogue",
       );
       return openAiResponse(waiterImport);
     });
@@ -203,7 +215,7 @@ describe("POST screenplay import", () => {
         {
           ...waiterImport.items[4],
           order: 4,
-          text: "(then; to Spencer)\nNo—I'm staying.",
+          text: "Not from me.\n(then; to Spencer)\nYou ready?",
         },
         {
           order: 5,
@@ -244,7 +256,21 @@ describe("POST screenplay import", () => {
       {
         order: 2,
         speaker: "Mitch",
-        text: "(then; to Spencer)\nNo—I'm staying.",
+        text: "Not from me.",
+        isStageDirection: false,
+        confidence: 0.98,
+      },
+      {
+        order: 3,
+        speaker: null,
+        text: "(then; to Spencer)",
+        isStageDirection: true,
+        confidence: 0.98,
+      },
+      {
+        order: 4,
+        speaker: "Mitch",
+        text: "You ready?",
         isStageDirection: false,
         confidence: 0.98,
       },
@@ -347,13 +373,15 @@ describe("POST screenplay import", () => {
       null,
       "Spencer",
       "Waiter",
+      null,
       "Mitch (V.O.)",
       "Spencer",
       "Waiter",
       "Mitch",
       null,
     ]);
-    expect(result.items[4].text).toBe("(quietly)\nI already know what I want.");
+    expect(result.items[4].text).toBe("(quietly)");
+    expect(result.items[5].text).toBe("I already know what I want.");
   });
 
   it("rejects MIME spoofing before calling OpenAI", async () => {

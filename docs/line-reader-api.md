@@ -48,8 +48,9 @@ Successful responses use `application/json`:
 ```
 
 `characters` and `items` are ordered by first appearance and reading order. `text` is returned
-verbatim. Parentheticals remain in their dialogue item's text. Directions, headings, and labels
-such as `Role`, `START`, and `END` have a `null` speaker and are not characters. Character names
+verbatim. Standalone screenplay parentheticals are separate direction items with a `null` speaker;
+dialogue before and after one becomes separate spoken items for the same character. Directions,
+headings, and labels such as `Role`, `START`, and `END` have a `null` speaker and are not characters. Character names
 are deterministically display-cased from spoken cues; cue suffixes remain on item speakers (for
 example, `Jane (V.O.)`) but are not part of the character identity (`Jane`).
 

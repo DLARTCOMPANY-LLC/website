@@ -57,7 +57,7 @@ export const screenplayJsonSchema = {
           text: {
             type: "string",
             description:
-              "Verbatim screenplay text with original punctuation, apostrophes, hyphens, parentheticals, and line breaks.",
+              "Verbatim screenplay text with original punctuation, apostrophes, hyphens, and line breaks. Standalone parentheticals are separate direction items.",
           },
           isStageDirection: {
             type: "boolean",
@@ -101,11 +101,12 @@ export const screenplayExtractionInstructions = [
   "",
   "LAYOUT AND READING ORDER",
   "- Infer screenplay roles from visual layout, especially cue centering/indentation, dialogue-column indentation, parenthetical placement, and top-to-bottom reading order; do not classify by capitalization alone.",
-  "- Create one item per contiguous screenplay unit. Keep each character cue's immediately following parenthetical(s) and dialogue together in one dialogue item.",
+  "- Create one item per contiguous screenplay unit. Every standalone parenthetical under a character cue is its own item with speaker=null and isStageDirection=true.",
+  "- Split a character block around parentheticals. For example, `Not from me.` then `(then; to Spencer)` then `You ready?` becomes three ordered items: Mitch dialogue, direction, Mitch dialogue. Never put the parenthetical in either spoken item.",
   "- Never merge separate turns, even when the same character speaks again later. Never split one turn merely because it wraps across visual lines.",
   "",
   "VERBATIM TRANSCRIPTION",
-  "- Preserve every visible dialogue word exactly. Preserve punctuation, straight or curly apostrophes, quotation marks, hyphens/dashes, capitalization, parentheticals, and line order. Preserve visible line breaks within item text.",
+  "- Preserve every visible dialogue word exactly. Preserve punctuation, straight or curly apostrophes, quotation marks, hyphens/dashes, capitalization, and line order. Preserve visible line breaks within each item.",
   "- Do not modernize punctuation, silently correct grammar, normalize contractions, paraphrase, summarize, infer hidden text, or invent missing words.",
   "- Retain useful printed stage directions and action. Exclude non-content UI and annotations rather than turning them into stage directions.",
   "",
@@ -188,14 +189,34 @@ export function validateModelImport(value: unknown): ModelScreenplayImport {
       if (reservedDirectionNames.has(identityKey)) {
         throw new ModelValidationError(`${speaker} must be classified as a direction`);
       }
-      let characterName = characterNames.get(identityKey);
-      if (!characterName) {
-        characterName = toDisplayName(cue.identity);
-        characterNames.set(identityKey, characterName);
-        characters.push(characterName);
+      const segments = splitDialogueParentheticals(text);
+      for (const segment of segments) {
+        if (segment.isParenthetical) {
+          items.push({
+            order: items.length + 1,
+            speaker: null,
+            text: segment.text,
+            isStageDirection: true,
+            confidence,
+          });
+          continue;
+        }
+        let characterName = characterNames.get(identityKey);
+        if (!characterName) {
+          characterName = toDisplayName(cue.identity);
+          characterNames.set(identityKey, characterName);
+          characters.push(characterName);
+        }
+        items.push({
+          order: items.length + 1,
+          speaker: characterName + cue.suffix,
+          text: segment.text,
+          isStageDirection: false,
+          confidence,
+        });
+        dialogueCount += 1;
       }
-      normalizedSpeaker = characterName + cue.suffix;
-      dialogueCount += 1;
+      return;
     }
 
     items.push({
@@ -258,6 +279,34 @@ function removeMergedAuditionUi(value: string): string {
     .replace(/^[ \t]*Role:[^\r\n]*(?:\r?\n)+/i, "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+\s*\d*(?:START|END)\s*$/i, "")
     .replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, "");
+}
+
+function splitDialogueParentheticals(
+  value: string,
+): Array<{ text: string; isParenthetical: boolean }> {
+  const parts = value.split(/(\r\n|\n|\r)/);
+  const segments: Array<{ text: string; isParenthetical: boolean }> = [];
+  let dialogue = "";
+
+  const flushDialogue = (): void => {
+    const text = dialogue.replace(/^(?:\r\n|\n|\r)+|(?:\r\n|\n|\r)+$/g, "");
+    if (text) segments.push({ text, isParenthetical: false });
+    dialogue = "";
+  };
+
+  for (let index = 0; index < parts.length; index += 2) {
+    const line = parts[index];
+    const separator = parts[index + 1] ?? "";
+    if (/^[ \t]*\([^()\r\n]+\)[ \t]*$/.test(line)) {
+      flushDialogue();
+      segments.push({ text: line.trim(), isParenthetical: true });
+    } else {
+      dialogue += line + separator;
+    }
+  }
+  flushDialogue();
+
+  return segments.length > 0 ? segments : [{ text: value, isParenthetical: false }];
 }
 
 export class ModelValidationError extends Error {
