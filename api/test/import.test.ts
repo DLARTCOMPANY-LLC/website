@@ -22,6 +22,7 @@ const waiterImport = {
       speaker: null,
       text: "Role",
       isStageDirection: true,
+      isArtifact: false,
       confidence: 1,
     },
     {
@@ -29,6 +30,7 @@ const waiterImport = {
       speaker: null,
       text: "START",
       isStageDirection: true,
+      isArtifact: false,
       confidence: 1,
     },
     {
@@ -36,6 +38,7 @@ const waiterImport = {
       speaker: "Spencer",
       text: "Could we see a menu?",
       isStageDirection: false,
+      isArtifact: false,
       confidence: 0.99,
     },
     {
@@ -43,6 +46,7 @@ const waiterImport = {
       speaker: "Waiter",
       text: "Of course.",
       isStageDirection: false,
+      isArtifact: false,
       confidence: 0.99,
     },
     {
@@ -50,6 +54,7 @@ const waiterImport = {
       speaker: "Mitch",
       text: "(quietly)\nI already know what I want.",
       isStageDirection: false,
+      isArtifact: false,
       confidence: 0.98,
     },
     {
@@ -57,6 +62,7 @@ const waiterImport = {
       speaker: "Spencer",
       text: "You always do.",
       isStageDirection: false,
+      isArtifact: false,
       confidence: 0.99,
     },
     {
@@ -64,6 +70,7 @@ const waiterImport = {
       speaker: "Waiter",
       text: "May I bring you something to drink?",
       isStageDirection: false,
+      isArtifact: false,
       confidence: 0.99,
     },
     {
@@ -71,6 +78,7 @@ const waiterImport = {
       speaker: "Mitch",
       text: "Water, please.",
       isStageDirection: false,
+      isArtifact: false,
       confidence: 0.99,
     },
     {
@@ -78,6 +86,7 @@ const waiterImport = {
       speaker: null,
       text: "END",
       isStageDirection: true,
+      isArtifact: false,
       confidence: 1,
     },
   ],
@@ -99,6 +108,16 @@ describe("POST screenplay import", () => {
       );
       expect(providerRequest.store).toBe(false);
       expect(providerRequest.model).toBe("gpt-4.1-mini");
+      expect(providerRequest.instructions).toContain("CONTENT BOUNDARY");
+      expect(providerRequest.instructions).toContain(
+        "Classify handwritten audition annotations",
+      );
+      expect(providerRequest.instructions).toContain(
+        "verify that every visible dialogue block appears exactly once",
+      );
+      expect(providerRequest.instructions).toContain(
+        "Preserve punctuation, straight or curly apostrophes",
+      );
       expect(providerRequest.text.format.strict).toBe(true);
       expect(providerRequest.input[0].content[1].image_url).toMatch(
         /^data:image\/png;base64,/,
@@ -123,6 +142,176 @@ describe("POST screenplay import", () => {
         .map((item) => item.text),
     ).toEqual(["Role", "START", "END"]);
     expect(result.items[4].text).toBe("(quietly)\nI already know what I want.");
+  });
+
+  it("uses original image detail and bounded reasoning for GPT-5.6", async () => {
+    const openAiFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const providerRequest = JSON.parse(String(init?.body));
+      expect(providerRequest.model).toBe("gpt-5.6-luna");
+      expect(providerRequest.reasoning).toEqual({
+        effort: "medium",
+        context: "current_turn",
+      });
+      expect(providerRequest.input[0].content[1].detail).toBe("original");
+      expect(providerRequest.instructions).toContain(
+        "Never merge separate turns",
+      );
+      expect(providerRequest.instructions).toContain(
+        "surrounding PDF/image viewer chrome",
+      );
+      expect(providerRequest.instructions).toContain(
+        "Cross-check it against every spoken item",
+      );
+      return openAiResponse(waiterImport);
+    });
+
+    const response = await handleRequest(
+      createRequest(),
+      { ...env, OPENAI_VISION_MODEL: "gpt-5.6-luna" },
+      dependencies(openAiFetch),
+    );
+
+    expect(response.status).toBe(200);
+    expect(openAiFetch).toHaveBeenCalledOnce();
+  });
+
+  it("excludes classified viewer chrome and annotations without dropping dialogue", async () => {
+    const adversarialImport = {
+      ...waiterImport,
+      items: [
+        {
+          order: 1,
+          speaker: null,
+          text: "Role: WAITER",
+          isStageDirection: true,
+          isArtifact: true,
+          confidence: 1,
+        },
+        {
+          ...waiterImport.items[2],
+          order: 2,
+          text: "You couldn't leave—could you?",
+        },
+        {
+          order: 3,
+          speaker: null,
+          text: "handwritten arrow",
+          isStageDirection: true,
+          isArtifact: true,
+          confidence: 0.95,
+        },
+        {
+          ...waiterImport.items[4],
+          order: 4,
+          text: "(then; to Spencer)\nNo—I'm staying.",
+        },
+        {
+          order: 5,
+          speaker: null,
+          text: "END",
+          isStageDirection: true,
+          isArtifact: true,
+          confidence: 1,
+        },
+      ],
+    };
+
+    const response = await handleRequest(
+      createRequest(),
+      env,
+      dependencies(vi.fn(async () => openAiResponse(adversarialImport))),
+    );
+    const result = (await response.json()) as {
+      characters: string[];
+      items: Array<{
+        order: number;
+        speaker: string | null;
+        text: string;
+        isStageDirection: boolean;
+      }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(result.characters).toEqual(["Spencer", "Mitch"]);
+    expect(result.items).toEqual([
+      {
+        order: 1,
+        speaker: "Spencer",
+        text: "You couldn't leave—could you?",
+        isStageDirection: false,
+        confidence: 0.99,
+      },
+      {
+        order: 2,
+        speaker: "Mitch",
+        text: "(then; to Spencer)\nNo—I'm staying.",
+        isStageDirection: false,
+        confidence: 0.98,
+      },
+    ]);
+  });
+
+  it("removes audition UI accidentally merged into retained stage text", async () => {
+    const mergedUiImport = {
+      ...waiterImport,
+      items: [
+        {
+          order: 1,
+          speaker: null,
+          text: 'Role: WAITER\nEp. 406 "Racket Club" - Blue Revision 12/12/25 22.',
+          isStageDirection: true,
+          isArtifact: false,
+          confidence: 0.99,
+        },
+        {
+          ...waiterImport.items[2],
+          order: 2,
+          text: "You couldn't leave—could you?",
+        },
+        {
+          order: 3,
+          speaker: null,
+          text: "The Waiter heads off.\b0END",
+          isStageDirection: true,
+          isArtifact: false,
+          confidence: 0.98,
+        },
+      ],
+    };
+
+    const response = await handleRequest(
+      createRequest(),
+      env,
+      dependencies(vi.fn(async () => openAiResponse(mergedUiImport))),
+    );
+    const result = (await response.json()) as {
+      items: Array<{ order: number; text: string }>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(result.items).toEqual([
+      {
+        order: 1,
+        speaker: null,
+        text: 'Ep. 406 "Racket Club" - Blue Revision 12/12/25 22.',
+        isStageDirection: true,
+        confidence: 0.99,
+      },
+      {
+        order: 2,
+        speaker: "Spencer",
+        text: "You couldn't leave—could you?",
+        isStageDirection: false,
+        confidence: 0.99,
+      },
+      {
+        order: 3,
+        speaker: null,
+        text: "The Waiter heads off.",
+        isStageDirection: true,
+        confidence: 0.98,
+      },
+    ]);
   });
 
   it("derives canonical display names from mixed-case spoken cues", async () => {

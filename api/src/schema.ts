@@ -29,7 +29,8 @@ export const screenplayJsonSchema = {
   properties: {
     characters: {
       type: "array",
-      description: "Character names in order of first appearance. Excludes headings and directions.",
+      description:
+        "Canonical character identities in order of first spoken appearance. Excludes cue suffixes, headings, directions, annotations, and viewer UI.",
       items: { type: "string" },
     },
     items: {
@@ -38,14 +39,36 @@ export const screenplayJsonSchema = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["order", "speaker", "text", "isStageDirection", "confidence"],
+        required: [
+          "order",
+          "speaker",
+          "text",
+          "isStageDirection",
+          "isArtifact",
+          "confidence",
+        ],
         properties: {
           order: { type: "integer", minimum: 1 },
           speaker: {
+            description:
+              "Visible character cue for dialogue, including cue suffixes such as (V.O.); null for non-dialogue.",
             anyOf: [{ type: "string" }, { type: "null" }],
           },
-          text: { type: "string" },
-          isStageDirection: { type: "boolean" },
+          text: {
+            type: "string",
+            description:
+              "Verbatim screenplay text with original punctuation, apostrophes, hyphens, parentheticals, and line breaks.",
+          },
+          isStageDirection: {
+            type: "boolean",
+            description:
+              "False only for a character cue's spoken block; true for useful screenplay action, headings, and transitions.",
+          },
+          isArtifact: {
+            type: "boolean",
+            description:
+              "True only for detected viewer/app UI, handwritten annotations, or isolated margin marks that must not appear in the screenplay import.",
+          },
           confidence: { type: "number", minimum: 0, maximum: 1 },
         },
       },
@@ -64,6 +87,35 @@ export const screenplayJsonSchema = {
     },
   },
 } as const;
+
+export const screenplayExtractionInstructions = [
+  "You are a production screenplay transcription engine. Analyze the image visually and return only the screenplay content represented by the schema.",
+  "",
+  "CONTENT BOUNDARY",
+  "- Separate the screenplay page from surrounding PDF/image viewer chrome, audition-app controls, page thumbnails, toolbars, filenames, status bars, buttons, and navigation labels.",
+  "- Classify handwritten audition annotations, highlights, arrows, circles, strike-throughs, isolated margin marks, and overlay labels such as Role, START, or END as isArtifact=true when they are not typeset screenplay text.",
+  "- Audition screenshots commonly place a `Role: CHARACTER` banner above the page and floating START/END markers beside or over it. Treat those banners and markers as app UI, not screenplay directions, even though their text is legible. Never merge a UI banner line into a printed page header.",
+  "- Use the page's paper boundary, background, typography, alignment, and continuous text flow to decide what belongs to the screenplay. When a retained printed line is adjacent to excluded UI, return only the printed line.",
+  "- Represent each detected UI/annotation unit as its own item with speaker=null, isStageDirection=true, and isArtifact=true. Never combine artifact text with printed screenplay text in one item. Set isArtifact=false for every retained screenplay unit.",
+  "- Include typeset screenplay scene headings, action, transitions, character cues, parentheticals, and dialogue. Page headers or revision marks may be retained only when clearly printed as part of the screenplay page.",
+  "",
+  "LAYOUT AND READING ORDER",
+  "- Infer screenplay roles from visual layout, especially cue centering/indentation, dialogue-column indentation, parenthetical placement, and top-to-bottom reading order; do not classify by capitalization alone.",
+  "- Create one item per contiguous screenplay unit. Keep each character cue's immediately following parenthetical(s) and dialogue together in one dialogue item.",
+  "- Never merge separate turns, even when the same character speaks again later. Never split one turn merely because it wraps across visual lines.",
+  "",
+  "VERBATIM TRANSCRIPTION",
+  "- Preserve every visible dialogue word exactly. Preserve punctuation, straight or curly apostrophes, quotation marks, hyphens/dashes, capitalization, parentheticals, and line order. Preserve visible line breaks within item text.",
+  "- Do not modernize punctuation, silently correct grammar, normalize contractions, paraphrase, summarize, infer hidden text, or invent missing words.",
+  "- Retain useful printed stage directions and action. Exclude non-content UI and annotations rather than turning them into stage directions.",
+  "",
+  "SPEAKERS AND VALIDATION",
+  "- For dialogue, speaker is the visible character cue and isStageDirection is false. For all retained non-dialogue, speaker is null and isStageDirection is true.",
+  "- characters contains character identities in first-spoken order. Cross-check it against every spoken item. Do not include cue suffixes such as (V.O.) or (O.S.) in the identity; preserve those suffixes on item speakers.",
+  "- Before returning, self-audit the page from top to bottom: verify that every visible dialogue block appears exactly once, no separate turns were merged, no screenplay text was invented, and all item order values are consecutive.",
+  "- Cross-check every isArtifact classification against the visual page boundary. If uncertain whether text is printed screenplay content, retain it with isArtifact=false and add a warning rather than silently dropping it.",
+  "- Use confidence honestly. Put concise location-specific uncertainty in diagnostics.warnings when text is cropped, obscured, ambiguous, or illegible; never guess to avoid a warning.",
+].join("\n");
 
 const reservedDirectionNames = new Set(["ROLE", "START", "END"]);
 
@@ -94,27 +146,40 @@ export function validateModelImport(value: unknown): ModelScreenplayImport {
   const characterNames = new Map<string, string>();
   const characters: string[] = [];
   let dialogueCount = 0;
-  const items = root.items.map((item, index): ScreenplayItem => {
+  const items: ScreenplayItem[] = [];
+  root.items.forEach((item, index) => {
     const record = asRecord(item, `items[${index}]`);
     assertExactKeys(
       record,
-      ["order", "speaker", "text", "isStageDirection", "confidence"],
+      ["order", "speaker", "text", "isStageDirection", "isArtifact", "confidence"],
       `items[${index}]`,
     );
     if (record.order !== index + 1) {
       throw new ModelValidationError(`items[${index}].order must equal ${index + 1}`);
     }
-    const text = requireNonEmptyString(record.text, `items[${index}].text`);
+    let text = requireNonEmptyString(record.text, `items[${index}].text`);
     const confidence = requireConfidence(record.confidence, `items[${index}].confidence`);
     if (typeof record.isStageDirection !== "boolean") {
       throw new ModelValidationError(`items[${index}].isStageDirection must be a boolean`);
     }
+    if (typeof record.isArtifact !== "boolean") {
+      throw new ModelValidationError(`items[${index}].isArtifact must be a boolean`);
+    }
 
     let normalizedSpeaker: string | null;
-    if (record.isStageDirection) {
+    if (record.isArtifact) {
+      if (record.speaker !== null || !record.isStageDirection) {
+        throw new ModelValidationError(
+          `items[${index}] artifacts must be directions with a null speaker`,
+        );
+      }
+      return;
+    } else if (record.isStageDirection) {
       if (record.speaker !== null) {
         throw new ModelValidationError(`items[${index}].speaker must be null for a direction`);
       }
+      text = removeMergedAuditionUi(text);
+      if (!text) return;
       normalizedSpeaker = null;
     } else {
       const speaker = requireNonEmptyString(record.speaker, `items[${index}].speaker`);
@@ -133,13 +198,13 @@ export function validateModelImport(value: unknown): ModelScreenplayImport {
       dialogueCount += 1;
     }
 
-    return {
-      order: index + 1,
+    items.push({
+      order: items.length + 1,
       speaker: normalizedSpeaker,
       text,
       isStageDirection: record.isStageDirection,
       confidence,
-    };
+    });
   });
 
   if (dialogueCount === 0) {
@@ -186,6 +251,13 @@ function toDisplayName(value: string): string {
   return value
     .toLocaleLowerCase("en-US")
     .replace(/(^|[\s\-'])\p{L}/gu, (match) => match.toLocaleUpperCase("en-US"));
+}
+
+function removeMergedAuditionUi(value: string): string {
+  return value
+    .replace(/^[ \t]*Role:[^\r\n]*(?:\r?\n)+/i, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+\s*\d*(?:START|END)\s*$/i, "")
+    .replace(/^(?:\r?\n)+|(?:\r?\n)+$/g, "");
 }
 
 export class ModelValidationError extends Error {

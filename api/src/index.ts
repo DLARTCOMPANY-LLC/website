@@ -1,5 +1,6 @@
 import {
   ModelValidationError,
+  screenplayExtractionInstructions,
   screenplayJsonSchema,
   validateModelImport,
   type ScreenplayImport,
@@ -618,8 +619,8 @@ async function extractScreenplay(
   requestId: string,
   providerErrorLogger: typeof logProviderError,
 ): Promise<ScreenplayImport> {
-  const timeoutMs = positiveInteger(env.OPENAI_TIMEOUT_MS, 45_000, 5_000, 90_000);
-  const maxOutputTokens = positiveInteger(env.OPENAI_MAX_OUTPUT_TOKENS, 6_000, 1_000, 10_000);
+  const timeoutMs = positiveInteger(env.OPENAI_TIMEOUT_MS, 90_000, 5_000, 90_000);
+  const maxOutputTokens = positiveInteger(env.OPENAI_MAX_OUTPUT_TOKENS, 10_000, 1_000, 10_000);
   const apiKey = env.OPENAI_API_KEY!.trim();
   const keyCandidateError = getOpenAiKeyCandidateError(apiKey);
   if (keyCandidateError) {
@@ -638,6 +639,7 @@ async function extractScreenplay(
   let uploadedFileId: string | null = null;
   let failure: unknown;
   try {
+    const model = env.OPENAI_VISION_MODEL || "gpt-5.6-sol";
     const imageContent =
       upload.bytes.byteLength > MAX_INLINE_IMAGE_BYTES
         ? {
@@ -648,12 +650,12 @@ async function extractScreenplay(
               fetchImplementation,
               controller.signal,
             )),
-            detail: "high",
+            detail: model.startsWith("gpt-5.6") ? "original" : "high",
           }
         : {
             type: "input_image",
             image_url: `data:${upload.mediaType};base64,${toBase64(upload.bytes)}`,
-            detail: "high",
+            detail: model.startsWith("gpt-5.6") ? "original" : "high",
           };
     const response = await fetchImplementation(OPENAI_RESPONSES_URL, {
       method: "POST",
@@ -662,23 +664,20 @@ async function extractScreenplay(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: env.OPENAI_VISION_MODEL || "gpt-4.1-mini",
+        model,
         store: false,
         max_output_tokens: maxOutputTokens,
+        instructions: screenplayExtractionInstructions,
+        ...(model.startsWith("gpt-5.6")
+          ? { reasoning: { effort: "medium", context: "current_turn" } }
+          : {}),
         input: [
           {
             role: "user",
             content: [
               {
                 type: "input_text",
-                text: [
-                  "Transcribe this screenplay image without inventing, correcting, summarizing, or omitting visible content.",
-                  "Return character names in order of first spoken appearance.",
-                  "Return every visible screenplay unit in reading order. Combine each speaker's parenthetical and dialogue into one item, preserving all text verbatim and preserving line breaks.",
-                  "For spoken dialogue, set speaker to the visible character cue and isStageDirection to false.",
-                  "For headings, action, transitions, and labels such as Role, START, and END, set speaker to null and isStageDirection to true. Never list those labels as characters.",
-                  "Use confidence and warnings to identify uncertain or illegible text. Do not guess missing words.",
-                ].join("\n"),
+                text: "Transcribe the screenplay content in this image according to the production extraction instructions.",
               },
               imageContent,
             ],

@@ -108,10 +108,18 @@ Required secret:
 | `OPENAI_API_KEY` | Server-side OpenAI API key |
 
 Optional variables are documented in `.dev.vars.example`. The default model is
-`gpt-4.1-mini`; set `OPENAI_VISION_MODEL` to another Responses API model that supports image input
+`gpt-5.6-sol`; set `OPENAI_VISION_MODEL` to another Responses API model that supports image input
 and strict JSON Schema outputs. `CORS_ALLOWED_ORIGINS` is a comma-separated exact allowlist.
 `RATE_LIMIT_REQUESTS` defaults to 10 requests per client per 60 seconds, while
 `GLOBAL_RATE_LIMIT_REQUESTS` defaults to 100 total requests in the same durable global window.
+
+GPT-5.6 requests use original image detail and medium bounded reasoning to preserve small screenplay
+text and layout. The extraction schema explicitly classifies viewer chrome and audition annotations
+so they are removed before the public response; a narrow deterministic guard also removes audition
+`Role:` banners or control-character START/END overlays accidentally merged into retained stage text.
+Dialogue is never modified by this guard. At published standard pricing, GPT-5.6 Sol costs $5 per
+million input tokens and $30 per million output tokens; image tokens count as input, and reasoning
+tokens count toward the configured output-token ceiling.
 
 Local setup:
 
