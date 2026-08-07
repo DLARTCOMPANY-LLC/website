@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   evaluateRateWindows,
+  getOpenAiKeyCandidateError,
   handleRequest,
   isSafeOpenAiKeyCandidate,
   OpenAiError,
@@ -240,7 +241,7 @@ describe("POST screenplay import", () => {
     expect(error.provider).toMatchObject({
       operation: "configuration",
       type: "authentication_error",
-      code: "invalid_api_key_format",
+      code: "invalid_api_key_prefix",
     });
     expect(JSON.stringify(error.provider)).not.toContain("not-an-openai-key");
   });
@@ -534,16 +535,18 @@ describe("OpenAI key candidate validation", () => {
   });
 
   it.each([
-    ["embedded space", "sk-validlooking key-that-is-long"],
-    ["tab", "sk-validlooking\tkey-that-is-long"],
-    ["control", "sk-validlooking\u0000key-that-is-long"],
-    ["double quote", 'sk-validlooking"key-that-is-long'],
-    ["single quote", "sk-validlooking'key-that-is-long"],
-    ["Bearer value", "Bearer sk-validlooking-key-that-is-long"],
-    ["project ID", "proj_1234567890abcdefghijklmnop"],
-    ["too short", "sk-short"],
-  ])("rejects %s", (_case, value) => {
+    ["embedded space", "sk-validlooking key-that-is-long", "whitespace_or_control"],
+    ["tab", "sk-validlooking\tkey-that-is-long", "whitespace_or_control"],
+    ["control", "sk-validlooking\u0000key-that-is-long", "whitespace_or_control"],
+    ["double quote", 'sk-validlooking"key-that-is-long', "quote"],
+    ["single quote", "sk-validlooking'key-that-is-long", "quote"],
+    ["Bearer value", "Bearer sk-validlooking-key-that-is-long", "prefix"],
+    ["project ID", "proj_1234567890abcdefghijklmnop", "prefix"],
+    ["too short", "sk-short", "length"],
+    ["non-ASCII", "sk-validlooking-key-with-\u00e9-character", "non_ascii"],
+  ])("rejects %s", (_case, value, reason) => {
     expect(isSafeOpenAiKeyCandidate(value)).toBe(false);
+    expect(getOpenAiKeyCandidateError(value)).toBe(reason);
   });
 });
 

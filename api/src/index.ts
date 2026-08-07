@@ -621,12 +621,13 @@ async function extractScreenplay(
   const timeoutMs = positiveInteger(env.OPENAI_TIMEOUT_MS, 45_000, 5_000, 90_000);
   const maxOutputTokens = positiveInteger(env.OPENAI_MAX_OUTPUT_TOKENS, 6_000, 1_000, 10_000);
   const apiKey = env.OPENAI_API_KEY!.trim();
-  if (!isSafeOpenAiKeyCandidate(apiKey)) {
+  const keyCandidateError = getOpenAiKeyCandidateError(apiKey);
+  if (keyCandidateError) {
     throw new OpenAiError({
       ...emptyProviderError(),
       operation: "configuration",
       type: "authentication_error",
-      code: "invalid_api_key_format",
+      code: `invalid_api_key_${keyCandidateError}`,
       message: "Stored OpenAI key does not match the expected key format.",
     });
   }
@@ -733,22 +734,19 @@ async function extractScreenplay(
 }
 
 export function isSafeOpenAiKeyCandidate(value: string): boolean {
-  if (!value.startsWith("sk-") || value.length < 20 || value.length > 512) {
-    return false;
-  }
+  return getOpenAiKeyCandidateError(value) === null;
+}
 
+export function getOpenAiKeyCandidateError(value: string): string | null {
+  if (!value.startsWith("sk-")) return "prefix";
+  if (value.length < 20 || value.length > 512) return "length";
   for (const character of value) {
     const codePoint = character.codePointAt(0)!;
-    if (
-      codePoint < 0x21 ||
-      codePoint > 0x7e ||
-      character === '"' ||
-      character === "'"
-    ) {
-      return false;
-    }
+    if (codePoint <= 0x20 || codePoint === 0x7f) return "whitespace_or_control";
+    if (character === '"' || character === "'") return "quote";
+    if (codePoint > 0x7e) return "non_ascii";
   }
-  return true;
+  return null;
 }
 
 async function uploadVisionFile(
