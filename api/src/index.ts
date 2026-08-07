@@ -621,7 +621,7 @@ async function extractScreenplay(
   const timeoutMs = positiveInteger(env.OPENAI_TIMEOUT_MS, 45_000, 5_000, 90_000);
   const maxOutputTokens = positiveInteger(env.OPENAI_MAX_OUTPUT_TOKENS, 6_000, 1_000, 10_000);
   const apiKey = env.OPENAI_API_KEY!.trim();
-  if (!/^sk-(?:proj-)?[A-Za-z0-9_-]{20,}$/.test(apiKey)) {
+  if (!isSafeOpenAiKeyCandidate(apiKey)) {
     throw new OpenAiError({
       ...emptyProviderError(),
       operation: "configuration",
@@ -730,6 +730,25 @@ async function extractScreenplay(
   }
   const validated = validateModelImport(parsed);
   return { title: upload.title, ...validated };
+}
+
+export function isSafeOpenAiKeyCandidate(value: string): boolean {
+  if (!value.startsWith("sk-") || value.length < 20 || value.length > 512) {
+    return false;
+  }
+
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (
+      codePoint < 0x21 ||
+      codePoint > 0x7e ||
+      character === '"' ||
+      character === "'"
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 async function uploadVisionFile(

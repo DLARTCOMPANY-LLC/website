@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   evaluateRateWindows,
   handleRequest,
+  isSafeOpenAiKeyCandidate,
   OpenAiError,
   type Env,
   type RateWindow,
@@ -522,6 +523,27 @@ describe("POST screenplay import", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: { code: "not_found" },
     });
+  });
+});
+
+describe("OpenAI key candidate validation", () => {
+  it("accepts evolving printable punctuation after the sk- prefix", () => {
+    expect(
+      isSafeOpenAiKeyCandidate("sk-project.v2/key+segment=alpha_beta-123"),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["embedded space", "sk-validlooking key-that-is-long"],
+    ["tab", "sk-validlooking\tkey-that-is-long"],
+    ["control", "sk-validlooking\u0000key-that-is-long"],
+    ["double quote", 'sk-validlooking"key-that-is-long'],
+    ["single quote", "sk-validlooking'key-that-is-long"],
+    ["Bearer value", "Bearer sk-validlooking-key-that-is-long"],
+    ["project ID", "proj_1234567890abcdefghijklmnop"],
+    ["too short", "sk-short"],
+  ])("rejects %s", (_case, value) => {
+    expect(isSafeOpenAiKeyCandidate(value)).toBe(false);
   });
 });
 
