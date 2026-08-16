@@ -60,8 +60,30 @@ function b64encode(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/**
+ * Matches the real Interactions API response shape: the audio arrives as an
+ * audio part inside steps[].content[], not in an interaction.output_audio
+ * field. (The old mock used the invented interaction shape and is why the
+ * parser regression reached production.)
+ */
+function audioPart(data: Uint8Array): Record<string, unknown> {
+  return {
+    type: "audio",
+    data: b64encode(data),
+    channels: 1,
+    sample_rate: 24000,
+    mime_type: "audio/l16; rate=24000; channels=1",
+  };
+}
+
 function validTtsBody(): unknown {
-  return { interaction: { output_audio: { data: b64encode(PCM) } } };
+  return {
+    id: "v1_test",
+    status: "completed",
+    object: "interaction",
+    model: "gemini-3.1-flash-tts-preview",
+    steps: [{ type: "model_output", content: [audioPart(PCM)] }],
+  };
 }
 
 /**
@@ -482,10 +504,19 @@ describe("Gemini speech error mapping", () => {
   });
 
   it.each([
-    ["missing output_audio", { json: { interaction: {} } }],
+    ["missing audio part", { json: { steps: [] } }],
     [
       "odd-length PCM",
-      { json: { interaction: { output_audio: { data: b64encode(new Uint8Array([1, 2, 3])) } } } },
+      {
+        json: {
+          steps: [
+            {
+              type: "model_output",
+              content: [audioPart(new Uint8Array([1, 2, 3]))],
+            },
+          ],
+        },
+      },
     ],
     ["non-JSON body", { raw: "this is not json" }],
   ])("maps malformed TTS response %s to upstream_error", async (_case, tts) => {

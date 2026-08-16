@@ -1191,25 +1191,46 @@ function parseGeminiStageTags(text: string): string[] | null {
   return tags as string[];
 }
 
+/**
+ * The Interactions API returns the rendered audio as parts inside steps:
+ * `steps[].content[]`, where the audio part carries base64 L16 PCM in `data`
+ * (`type: "audio"`, e.g. `audio/l16; rate=24000; channels=1`). There is no
+ * `interaction.output_audio` field — the audio part is the only carrier.
+ */
 function extractGeminiPcm(body: unknown): Uint8Array {
   const root = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
-  const interaction = root.interaction;
-  const outputAudio =
-    typeof interaction === "object" && interaction !== null
-      ? (interaction as Record<string, unknown>).output_audio
-      : null;
-  const data =
-    typeof outputAudio === "object" && outputAudio !== null
-      ? (outputAudio as Record<string, unknown>).data
-      : null;
-  if (typeof data !== "string" || data.trim() === "") {
+  const steps = Array.isArray(root.steps) ? (root.steps as unknown[]) : [];
+  const pcmParts: Uint8Array[] = [];
+  for (const step of steps) {
+    const content =
+      typeof step === "object" && step !== null ? (step as Record<string, unknown>).content : null;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      const partRecord = (
+        typeof part === "object" && part !== null ? part : {}
+      ) as Record<string, unknown>;
+      if (partRecord.type !== "audio") continue;
+      const data = partRecord.data;
+      if (typeof data !== "string" || data.trim() === "") {
+        throw invalidProviderResponse("gemini_speech", "MissingOutputAudio", null);
+      }
+      let decoded: Uint8Array;
+      try {
+        decoded = decodeBase64Chunked(data);
+      } catch {
+        throw invalidProviderResponse("gemini_speech", "InvalidPcmAudio", null);
+      }
+      pcmParts.push(decoded);
+    }
+  }
+  if (pcmParts.length === 0) {
     throw invalidProviderResponse("gemini_speech", "MissingOutputAudio", null);
   }
-  let pcm: Uint8Array;
-  try {
-    pcm = decodeBase64Chunked(data);
-  } catch {
-    throw invalidProviderResponse("gemini_speech", "InvalidPcmAudio", null);
+  const pcm = new Uint8Array(pcmParts.reduce((sum, part) => sum + part.byteLength, 0));
+  let offset = 0;
+  for (const part of pcmParts) {
+    pcm.set(part, offset);
+    offset += part.byteLength;
   }
   if (pcm.byteLength === 0 || pcm.byteLength % 2 !== 0 || pcm.byteLength > MAX_GEMINI_PCM_BYTES) {
     throw invalidProviderResponse("gemini_speech", "InvalidPcmAudio", null);
