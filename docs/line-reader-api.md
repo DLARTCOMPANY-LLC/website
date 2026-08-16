@@ -77,30 +77,55 @@ Relevant statuses are `400`, `403`, `405`, `413`, `415`, `429`, `502`, `503`, an
 Safe provider-facing error codes include `provider_auth_error`, `provider_quota_exceeded`, and
 `provider_model_unavailable`; all other provider failures remain `upstream_error`.
 
-## OpenAI speech
+## Speech
 
 `POST /v1/audio/speech`
 
-Send `application/json` with exactly:
+Send `application/json` with:
 
 ```json
 {
   "text": "Privacy-safe rehearsal line.",
-  "voice": "marin"
+  "voice": "marin",
+  "stageNote": "quietly, almost to herself"
 }
 ```
 
 | Field | Type | Limits |
 | --- | --- | --- |
 | `text` | String | One non-empty dialogue utterance, no outer whitespace, maximum 2,000 Unicode characters and 8 KiB UTF-8 |
-| `voice` | String | One allowlisted built-in OpenAI voice |
+| `voice` | String | One allowlisted preset voice |
+| `stageNote` | String | Optional. Maximum 4,000 UTF-8 bytes. See stage notes below |
 
 Allowed voices are `alloy`, `ash`, `ballad`, `coral`, `echo`, `fable`, `nova`, `onyx`, `sage`,
-`shimmer`, `verse`, `marin`, and `cedar`. OpenAI currently recommends `marin` or `cedar` for best
-quality. The request body is limited to 16 KiB; unknown fields, unsupported controls, invalid
-Unicode, and unsupported voices are rejected before provider access.
+`shimmer`, `verse`, `marin`, and `cedar`. The request body is limited to 16 KiB; unknown fields,
+unsupported controls, invalid Unicode, unsupported voices, a non-string `stageNote`
+(`400` `invalid_stage_note`), and an over-limit `stageNote` (`413` `stage_note_too_large`) are
+rejected before provider access. A whitespace-only `stageNote` is treated as absent.
 
-A successful response is binary AAC audio:
+### Provider selection
+
+The active provider is chosen by the worker variable `GEMINI_SPEECH_ENABLED`
+(`"true"`/`"false"`, default `"false"`). There is no automatic fallback between providers.
+
+- **OpenAI (default).** When `GEMINI_SPEECH_ENABLED` is not `"true"`, the request uses OpenAI's
+  current `POST /v1/audio/speech` API with `response_format: "aac"` and `stream_format: "audio"`.
+  The model is `OPENAI_SPEECH_MODEL` (default `gpt-4o-mini-tts`). A successful response is binary
+  AAC audio with `Content-Type: audio/aac`, `X-Speech-Model: <OpenAI model>`, and
+  `X-Speech-Voice: <requested preset>`. `stageNote` is accepted but ignored on this path. Audio is
+  capped at 8 MiB and generated under a configurable 30-second timeout.
+- **Google Gemini.** When `GEMINI_SPEECH_ENABLED` is `"true"`, the request uses Gemini TTS
+  (`GEMINI_SPEECH_MODEL`, default `gemini-3.1-flash-tts-preview`) via
+  `POST {GEMINI_BASE_URL}/v1beta/interactions`. The preset voice maps to a fixed Gemini voice
+  (for example `marin` → `Umbriel`), and `X-Speech-Voice` still returns the requested preset.
+  A successful response is a 16-bit, 24,000 Hz, mono PCM sample wrapped in a standard 44-byte
+  RIFF/WAVE header with `Content-Type: audio/wav` and `X-Speech-Model: <Gemini model>`. Audio is
+  generated under `GEMINI_SPEECH_TIMEOUT_MS` (default 30,000 ms).
+
+Both providers share the same per-IP rate limit, CORS handling, and the success headers
+`Cache-Control: no-store, private`, `Content-Length`, `Content-Type`,
+`X-Content-Type-Options: nosniff`, `X-Request-Id`, `X-Speech-Model`, and `X-Speech-Voice`.
+A successful OpenAI response for example:
 
 ```http
 HTTP/1.1 200 OK
@@ -111,10 +136,17 @@ X-Speech-Voice: marin
 X-Request-Id: <uuid>
 ```
 
-The Worker uses OpenAI's current `POST /v1/audio/speech` API with `response_format: "aac"` and
-`stream_format: "audio"`. AAC is directly playable by iOS and Android. Audio is capped at 8 MiB,
-generated under a configurable 30-second timeout, and never cached. OpenAI requires the app to
-clearly disclose that playback is AI-generated speech.
+### Stage notes
+
+`stageNote` carries an optional stage direction (for example "quietly, almost to herself"). It is
+**only** interpreted on the Gemini path: the Worker first asks the `GEMINI_LLM_MODEL`
+(default `gemini-3.1-flash`) LLM to convert the stage note into zero to four audio-effect tags from
+a fixed English vocabulary, then synthesizes the line with those tags inlined ahead of the verbatim
+text. The stage note text itself is never spoken, and the line is never rewritten. When the LLM
+call fails or returns invalid tags (non-JSON, unknown tag, or more than four), the Worker degrades
+to synthesizing the plain line and logs a distinct provider code
+(`stage_note_tags_unavailable` when the call failed, `stage_note_tags_rejected` when the output
+failed validation); the request does not fail. On the OpenAI path, `stageNote` is ignored.
 
 Errors use the same JSON shape as screenplay import. Provider authentication, quota, and model
 availability remain safely distinguishable without exposing provider response text.
@@ -164,12 +196,27 @@ Required secret:
 | Variable | Purpose |
 | --- | --- |
 | `OPENAI_API_KEY` | Server-side OpenAI API key |
+| `GEMINI_API_KEY` | Google Gemini API key; required only when `GEMINI_SPEECH_ENABLED` is `"true"` |
+
+`GEMINI_API_KEY` is set only as a Worker secret and is never committed. When Gemini speech is
+disabled the Worker does not call Google, so the key may be absent.
 
 Optional variables are documented in `.dev.vars.example`. The default model is
 `gpt-5.6-sol`; set `OPENAI_VISION_MODEL` to another Responses API model that supports image input
 and strict JSON Schema outputs. `CORS_ALLOWED_ORIGINS` is a comma-separated exact allowlist.
 `OPENAI_SPEECH_MODEL` defaults to `gpt-4o-mini-tts` and is restricted to supported OpenAI speech
 models. `OPENAI_SPEECH_TIMEOUT_MS` defaults to 30,000 milliseconds.
+
+Gemini speech variables (all optional; OpenAI remains the default when
+`GEMINI_SPEECH_ENABLED` is not `"true"`):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GEMINI_SPEECH_ENABLED` | `false` | Routes `/v1/audio/speech` to Gemini TTS when `"true"` |
+| `GEMINI_SPEECH_MODEL` | `gemini-3.1-flash-tts-preview` | Gemini TTS model id |
+| `GEMINI_LLM_MODEL` | `gemini-3.1-flash` | Gemini model used to turn a `stageNote` into tags |
+| `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | Gemini API base URL |
+| `GEMINI_SPEECH_TIMEOUT_MS` | `30000` | Timeout budget shared by the stage-note and TTS calls |
 `RATE_LIMIT_REQUESTS` defaults to 10 requests per client per 60 seconds, while
 `GLOBAL_RATE_LIMIT_REQUESTS` defaults to 100 total requests in the same durable global window.
 
@@ -215,6 +262,17 @@ npm run api:deploy
 
 The `v1` Wrangler migration creates the SQLite-backed `RateLimiter` Durable Object on first deploy.
 
+### Rolling out Gemini speech
+
+To switch `/v1/audio/speech` from OpenAI to Gemini, keep the repo the source of truth for the flag:
+set `GEMINI_SPEECH_ENABLED: "true"` in `wrangler.jsonc`, store the key
+(`npx wrangler secret put GEMINI_API_KEY`), and redeploy (`npm run api:deploy`). Committing the
+`wrangler.jsonc` change keeps production and the repo in agreement. Use
+`npx wrangler var put GEMINI_SPEECH_ENABLED true` only as a temporary emergency lever — it is
+invisible in the repo, so pair it with a follow-up commit to `wrangler.jsonc`. Rolling back works
+the same way in reverse (set the var back to `"false"` and redeploy); no data migration is needed
+and the OpenAI path resumes immediately.
+
 Production currently uses `https://dlartcompany-screenplay-api.dlartcompany.workers.dev`. LineReader
-uses `/v1/screenplays/import` for OpenAI OCR and `/v1/audio/speech` for OpenAI speech. A dedicated
+uses `/v1/screenplays/import` for OpenAI OCR and `/v1/audio/speech` for speech. A dedicated
 API hostname can replace the `workers.dev` hostname later without changing either route contract.
