@@ -36,7 +36,7 @@
     "OPENAI_TIMEOUT_MS": "90000",
     "OPENAI_MAX_OUTPUT_TOKENS": "10000",
     "OPENAI_SPEECH_TIMEOUT_MS": "30000",
-    "GEMINI_SPEECH_ENABLED": "false",
+    "GEMINI_SPEECH_ENABLED": "true",
     "GEMINI_SPEECH_MODEL": "gemini-3.1-flash-tts-preview",
     "GEMINI_LLM_MODEL": "gemini-3.1-flash",
     "GEMINI_BASE_URL": "https://generativelanguage.googleapis.com",
