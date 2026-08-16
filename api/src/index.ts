@@ -1134,11 +1134,12 @@ function buildGeminiStageTagPrompt(line: string, stageNote: string): string {
     `"${stageNote}"`,
     "",
     "Rules:",
-    '- Respond with ONLY a JSON object shaped like {"tags": ["tag"]}.',
+    "- Output exactly one JSON object that matches the schema, and nothing else.",
+    "- Zero prose: no explanation, no markdown, no code fences, no extra fields.",
+    '- Shape: {"tags": ["tag"]}.',
     `- "tags" contains zero to ${GEMINI_STAGE_TAG_LIMIT} entries.`,
     `- Every tag must be exactly one of these lowercase English tags: ${[...GEMINI_AUDIO_TAGS].join(", ")}.`,
     "- Do not rewrite, summarize, translate, or echo the dialogue line.",
-    "- Do not include any text or fields outside the JSON object.",
   ].join("\n");
 }
 

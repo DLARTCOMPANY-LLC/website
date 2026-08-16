@@ -262,6 +262,17 @@ npm run api:deploy
 
 The `v1` Wrangler migration creates the SQLite-backed `RateLimiter` Durable Object on first deploy.
 
+### Rolling out Gemini speech
+
+To switch `/v1/audio/speech` from OpenAI to Gemini, keep the repo the source of truth for the flag:
+set `GEMINI_SPEECH_ENABLED: "true"` in `wrangler.jsonc`, store the key
+(`npx wrangler secret put GEMINI_API_KEY`), and redeploy (`npm run api:deploy`). Committing the
+`wrangler.jsonc` change keeps production and the repo in agreement. Use
+`npx wrangler var put GEMINI_SPEECH_ENABLED true` only as a temporary emergency lever — it is
+invisible in the repo, so pair it with a follow-up commit to `wrangler.jsonc`. Rolling back works
+the same way in reverse (set the var back to `"false"` and redeploy); no data migration is needed
+and the OpenAI path resumes immediately.
+
 Production currently uses `https://dlartcompany-screenplay-api.dlartcompany.workers.dev`. LineReader
-uses `/v1/screenplays/import` for OpenAI OCR and `/v1/audio/speech` for OpenAI speech. A dedicated
+uses `/v1/screenplays/import` for OpenAI OCR and `/v1/audio/speech` for speech. A dedicated
 API hostname can replace the `workers.dev` hostname later without changing either route contract.
