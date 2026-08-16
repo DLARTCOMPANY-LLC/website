@@ -32,6 +32,16 @@ const SPEECH_RESPONSE_FORMAT = "aac";
 const SPEECH_CONTENT_TYPE = "audio/aac";
 const SPEECH_INSTRUCTIONS =
   "Speak exactly the provided dialogue without adding, omitting, or paraphrasing words. Use a natural, clear performance suitable for actor rehearsal.";
+const DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
+const DEFAULT_GEMINI_SPEECH_MODEL = "gemini-3.1-flash-tts-preview";
+const DEFAULT_GEMINI_LLM_MODEL = "gemini-3.1-flash";
+const GEMINI_PCM_SAMPLE_RATE = 24_000;
+const GEMINI_AUDIO_CONTENT_TYPE = "audio/wav";
+const GEMINI_STAGE_TAG_LIMIT = 4;
+const MAX_STAGE_NOTE_BYTES = 4_000;
+const MAX_GEMINI_PCM_BYTES = 32 * 1024 * 1024;
+const MAX_GEMINI_TTS_RESPONSE_BYTES = 48 * 1024 * 1024;
+const MAX_GEMINI_LLM_RESPONSE_BYTES = 64 * 1024;
 
 export const OPENAI_SPEECH_VOICES = [
   "alloy",
@@ -80,6 +90,12 @@ export interface Env {
   OPENAI_TIMEOUT_MS?: string;
   OPENAI_MAX_OUTPUT_TOKENS?: string;
   OPENAI_SPEECH_TIMEOUT_MS?: string;
+  GEMINI_API_KEY?: string;
+  GEMINI_SPEECH_ENABLED?: string;
+  GEMINI_SPEECH_MODEL?: string;
+  GEMINI_LLM_MODEL?: string;
+  GEMINI_BASE_URL?: string;
+  GEMINI_SPEECH_TIMEOUT_MS?: string;
 }
 
 interface HandlerDependencies {
@@ -146,7 +162,19 @@ export async function handleRequest(
   if (!cors.allowed) {
     return errorResponse(403, "origin_not_allowed", "Origin is not allowed", requestId);
   }
-  if (!env.OPENAI_API_KEY?.trim()) {
+  if (route === "speech" && isGeminiSpeechEnabled(env)) {
+    if (!env.GEMINI_API_KEY?.trim()) {
+      return withCors(
+        errorResponse(
+          503,
+          "service_not_configured",
+          "Gemini speech is not configured",
+          requestId,
+        ),
+        cors,
+      );
+    }
+  } else if (!env.OPENAI_API_KEY?.trim()) {
     return withCors(
       errorResponse(503, "service_not_configured", "OpenAI service is not configured", requestId),
       cors,
@@ -530,9 +558,51 @@ async function processImport(
 
 type SpeechVoice = (typeof OPENAI_SPEECH_VOICES)[number];
 
+const GEMINI_SPEECH_VOICE_MAP: Record<SpeechVoice, string> = {
+  alloy: "Charon",
+  echo: "Puck",
+  onyx: "Orus",
+  ash: "Algenib",
+  sage: "Sadaltager",
+  ballad: "Zubenelgenubi",
+  nova: "Kore",
+  fable: "Vindemiatrix",
+  coral: "Sulafat",
+  shimmer: "Achernar",
+  verse: "Despina",
+  marin: "Umbriel",
+  cedar: "Algieba",
+};
+
+const GEMINI_AUDIO_TAGS = [
+  "laughs",
+  "sigh",
+  "whispers",
+  "nervousness",
+  "frustration",
+  "amusement",
+  "tension",
+  "sarcasm",
+  "sadness",
+  "excitement",
+  "anger",
+  "confusion",
+  "disgust",
+  "surprise",
+  "fear",
+  "relief",
+  "determination",
+  "affection",
+] as const;
+
+function isGeminiSpeechEnabled(env: Env): boolean {
+  return env.GEMINI_SPEECH_ENABLED?.trim().toLowerCase() === "true";
+}
+
 interface ValidatedSpeechRequest {
   text: string;
   voice: SpeechVoice;
+  stageNote: string | null;
 }
 
 interface SynthesizedSpeech {
@@ -577,8 +647,11 @@ async function processSpeech(
     throw error;
   }
 
-  const model = env.OPENAI_SPEECH_MODEL?.trim() || DEFAULT_SPEECH_MODEL;
-  if (!OPENAI_SPEECH_MODELS.has(model)) {
+  const geminiEnabled = isGeminiSpeechEnabled(env);
+  const model = geminiEnabled
+    ? ""
+    : env.OPENAI_SPEECH_MODEL?.trim() || DEFAULT_SPEECH_MODEL;
+  if (!geminiEnabled && !OPENAI_SPEECH_MODELS.has(model)) {
     return withCors(
       errorResponse(
         503,
@@ -590,6 +663,7 @@ async function processSpeech(
     );
   }
   if (
+    !geminiEnabled &&
     (model === "tts-1" || model === "tts-1-hd") &&
     !LEGACY_SPEECH_VOICES.has(speechRequest.voice)
   ) {
@@ -605,12 +679,15 @@ async function processSpeech(
   }
 
   try {
-    const result = await synthesizeSpeech(
-      speechRequest,
-      model,
-      env,
-      fetchImplementation,
-    );
+    const result = geminiEnabled
+      ? await synthesizeGeminiSpeech(
+          speechRequest,
+          env,
+          fetchImplementation,
+          providerErrorLogger,
+          requestId,
+        )
+      : await synthesizeSpeech(speechRequest, model, env, fetchImplementation);
     return withCors(
       new Response(result.audio, {
         status: 200,
@@ -654,7 +731,9 @@ function validateSpeechRequest(value: unknown): ValidatedSpeechRequest {
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
-  const unexpected = keys.find((key) => key !== "text" && key !== "voice");
+  const unexpected = keys.find(
+    (key) => key !== "text" && key !== "voice" && key !== "stageNote",
+  );
   if (unexpected) {
     throw new ClientInputError(400, "unexpected_field", `Unexpected JSON field: ${unexpected}`);
   }
@@ -699,7 +778,24 @@ function validateSpeechRequest(value: unknown): ValidatedSpeechRequest {
   if (!(OPENAI_SPEECH_VOICES as readonly string[]).includes(record.voice)) {
     throw new ClientInputError(400, "invalid_voice", "voice is not supported");
   }
-  return { text, voice: record.voice as SpeechVoice };
+  let stageNote: string | null = null;
+  if (record.stageNote !== undefined) {
+    if (typeof record.stageNote !== "string") {
+      throw new ClientInputError(400, "invalid_stage_note", "stageNote must be a string");
+    }
+    if (record.stageNote.trim() === "") {
+      stageNote = null;
+    } else if (new TextEncoder().encode(record.stageNote).byteLength > MAX_STAGE_NOTE_BYTES) {
+      throw new ClientInputError(
+        413,
+        "stage_note_too_large",
+        `stageNote exceeds ${MAX_STAGE_NOTE_BYTES} UTF-8 bytes`,
+      );
+    } else {
+      stageNote = record.stageNote;
+    }
+  }
+  return { text, voice: record.voice as SpeechVoice, stageNote };
 }
 
 async function synthesizeSpeech(
@@ -812,6 +908,357 @@ async function synthesizeSpeech(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function synthesizeGeminiSpeech(
+  request: ValidatedSpeechRequest,
+  env: Env,
+  fetchImplementation: typeof fetch,
+  providerErrorLogger: typeof logProviderError,
+  requestId: string,
+): Promise<SynthesizedSpeech> {
+  const apiKey = env.GEMINI_API_KEY!.trim();
+  const base = (env.GEMINI_BASE_URL?.trim() || DEFAULT_GEMINI_BASE_URL).replace(/\/+$/, "");
+  const model = env.GEMINI_SPEECH_MODEL?.trim() || DEFAULT_GEMINI_SPEECH_MODEL;
+  const llmModel = env.GEMINI_LLM_MODEL?.trim() || DEFAULT_GEMINI_LLM_MODEL;
+  const timeoutMs = positiveInteger(env.GEMINI_SPEECH_TIMEOUT_MS, 30_000, 5_000, 60_000);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let input = request.text;
+    if (request.stageNote) {
+      const tags = await resolveGeminiStageTags(
+        request,
+        llmModel,
+        base,
+        apiKey,
+        controller,
+        fetchImplementation,
+        providerErrorLogger,
+        requestId,
+      );
+      if (tags.length > 0) {
+        input = tags.map((tag) => `[${tag}]`).join(" ") + ` ${request.text}`;
+      }
+    }
+
+    let response: Response;
+    try {
+      response = await fetchImplementation(`${base}/v1beta/interactions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          model,
+          input,
+          response_format: { type: "audio" },
+          generation_config: {
+            speech_config: [{ voice: GEMINI_SPEECH_VOICE_MAP[request.voice] }],
+          },
+        }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (controller.signal.aborted) throw new OpenAiTimeoutError();
+      throw OpenAiError.fromTransport(error, "gemini_speech");
+    }
+    if (!response.ok) {
+      const providerError = await OpenAiError.fromResponse(response, "gemini_speech");
+      if (controller.signal.aborted) throw new OpenAiTimeoutError();
+      throw providerError;
+    }
+
+    const declaredLength = parseContentLength(response.headers.get("content-length"));
+    if (declaredLength !== null && declaredLength > MAX_GEMINI_TTS_RESPONSE_BYTES) {
+      await response.body?.cancel();
+      throw invalidProviderResponse(
+        "gemini_speech",
+        "ResponseTooLarge",
+        response.headers.get("content-type"),
+      );
+    }
+
+    let body: ArrayBuffer;
+    try {
+      body = await readStreamWithLimit(response.body, MAX_GEMINI_TTS_RESPONSE_BYTES);
+    } catch (error) {
+      if (controller.signal.aborted) throw new OpenAiTimeoutError();
+      if (error instanceof RequestTooLargeError) {
+        throw invalidProviderResponse(
+          "gemini_speech",
+          "ResponseTooLarge",
+          response.headers.get("content-type"),
+        );
+      }
+      throw OpenAiError.fromTransport(error, "gemini_speech");
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+    } catch {
+      throw invalidProviderResponse(
+        "gemini_speech",
+        "InvalidJson",
+        response.headers.get("content-type"),
+      );
+    }
+
+    const pcm = extractGeminiPcm(parsed);
+    if (controller.signal.aborted) throw new OpenAiTimeoutError();
+
+    const audio = new ArrayBuffer(44 + pcm.byteLength);
+    new Uint8Array(audio).set(buildWavHeader(pcm));
+    new Uint8Array(audio, 44).set(pcm);
+    return {
+      audio,
+      contentType: GEMINI_AUDIO_CONTENT_TYPE,
+      model,
+      voice: request.voice,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function resolveGeminiStageTags(
+  request: ValidatedSpeechRequest,
+  llmModel: string,
+  base: string,
+  apiKey: string,
+  controller: AbortController,
+  fetchImplementation: typeof fetch,
+  providerErrorLogger: typeof logProviderError,
+  requestId: string,
+): Promise<string[]> {
+  const stageNote = request.stageNote!;
+  let text: string | null = null;
+  try {
+    const response = await fetchImplementation(
+      `${base}/v1beta/models/${llmModel}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: buildGeminiStageTagPrompt(request.text, stageNote) }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "object",
+              properties: { tags: { type: "array", items: { type: "string" } } },
+              required: ["tags"],
+            },
+            temperature: 0,
+          },
+        }),
+        signal: controller.signal,
+      },
+    );
+    if (controller.signal.aborted) throw new OpenAiTimeoutError();
+    if (!response.ok) {
+      const providerError = await OpenAiError.fromResponse(response, "gemini_stage_tags").catch(
+        () => new OpenAiError(emptyProviderError()),
+      );
+      providerErrorLogger(
+        requestId,
+        new OpenAiError({ ...providerError.provider, code: "stage_note_tags_unavailable" }),
+      );
+      return [];
+    }
+
+    const declaredLength = parseContentLength(response.headers.get("content-length"));
+    if (declaredLength !== null && declaredLength > MAX_GEMINI_LLM_RESPONSE_BYTES) {
+      await response.body?.cancel();
+      providerErrorLogger(requestId, geminiStageTagDegradation());
+      return [];
+    }
+
+    const body = await readStreamWithLimit(response.body, MAX_GEMINI_LLM_RESPONSE_BYTES);
+    text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+  } catch (error) {
+    if (controller.signal.aborted || error instanceof OpenAiTimeoutError) {
+      throw new OpenAiTimeoutError();
+    }
+    // The tag call is best-effort: any transport/read failure degrades to the plain line.
+    const providerError =
+      error instanceof OpenAiError ? error : OpenAiError.fromTransport(error, "gemini_stage_tags");
+    providerErrorLogger(
+      requestId,
+      new OpenAiError({
+        ...providerError.provider,
+        operation: "gemini_stage_tags",
+        code: "stage_note_tags_unavailable",
+      }),
+    );
+    return [];
+  }
+
+  const tags = parseGeminiStageTags(text!);
+  if (tags === null) {
+    providerErrorLogger(
+      requestId,
+      new OpenAiError({
+        ...emptyProviderError(),
+        operation: "gemini_stage_tags",
+        code: "stage_note_tags_rejected",
+        message: "Gemini stage-note tag output failed validation",
+      }),
+    );
+    return [];
+  }
+  return tags;
+}
+
+function geminiStageTagDegradation(): OpenAiError {
+  return new OpenAiError({
+    ...emptyProviderError(),
+    operation: "gemini_stage_tags",
+    code: "stage_note_tags_unavailable",
+    message: "Gemini stage-note tag call failed",
+  });
+}
+
+function buildGeminiStageTagPrompt(line: string, stageNote: string): string {
+  return [
+    "Convert the stage direction below into audio-effect tags for a text-to-speech model.",
+    "",
+    "Dialogue line:",
+    `"${line}"`,
+    "",
+    "Stage direction:",
+    `"${stageNote}"`,
+    "",
+    "Rules:",
+    '- Respond with ONLY a JSON object shaped like {"tags": ["tag"]}.',
+    `- "tags" contains zero to ${GEMINI_STAGE_TAG_LIMIT} entries.`,
+    `- Every tag must be exactly one of these lowercase English tags: ${[...GEMINI_AUDIO_TAGS].join(", ")}.`,
+    "- Do not rewrite, summarize, translate, or echo the dialogue line.",
+    "- Do not include any text or fields outside the JSON object.",
+  ].join("\n");
+}
+
+function parseGeminiStageTags(text: string): string[] | null {
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const root = (typeof envelope === "object" && envelope !== null ? envelope : {}) as Record<
+    string,
+    unknown
+  >;
+  const candidates = root.candidates;
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  const first = (typeof candidates[0] === "object" && candidates[0] !== null ? candidates[0] : {}) as Record<
+    string,
+    unknown
+  >;
+  const content = (typeof first.content === "object" && first.content !== null ? first.content : {}) as Record<
+    string,
+    unknown
+  >;
+  const parts = content.parts;
+  if (!Array.isArray(parts)) return null;
+  const inner = parts
+    .map((part) =>
+      typeof part === "object" && part !== null
+        ? (part as Record<string, unknown>).text
+        : undefined,
+    )
+    .filter((value): value is string => typeof value === "string")
+    .join("");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(inner);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const tags = (parsed as Record<string, unknown>).tags;
+  if (!Array.isArray(tags) || tags.length > GEMINI_STAGE_TAG_LIMIT) return null;
+  for (const tag of tags) {
+    if (typeof tag !== "string" || !(GEMINI_AUDIO_TAGS as readonly string[]).includes(tag)) {
+      return null;
+    }
+  }
+  return tags as string[];
+}
+
+function extractGeminiPcm(body: unknown): Uint8Array {
+  const root = (typeof body === "object" && body !== null ? body : {}) as Record<string, unknown>;
+  const interaction = root.interaction;
+  const outputAudio =
+    typeof interaction === "object" && interaction !== null
+      ? (interaction as Record<string, unknown>).output_audio
+      : null;
+  const data =
+    typeof outputAudio === "object" && outputAudio !== null
+      ? (outputAudio as Record<string, unknown>).data
+      : null;
+  if (typeof data !== "string" || data.trim() === "") {
+    throw invalidProviderResponse("gemini_speech", "MissingOutputAudio", null);
+  }
+  let pcm: Uint8Array;
+  try {
+    pcm = decodeBase64Chunked(data);
+  } catch {
+    throw invalidProviderResponse("gemini_speech", "InvalidPcmAudio", null);
+  }
+  if (pcm.byteLength === 0 || pcm.byteLength % 2 !== 0 || pcm.byteLength > MAX_GEMINI_PCM_BYTES) {
+    throw invalidProviderResponse("gemini_speech", "InvalidPcmAudio", null);
+  }
+  return pcm;
+}
+
+function decodeBase64Chunked(value: string): Uint8Array {
+  const chunkSize = 32_768;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (let index = 0; index < value.length; index += chunkSize) {
+    const decoded = Uint8Array.from(
+      atob(value.slice(index, index + chunkSize)),
+      (character) => character.charCodeAt(0),
+    );
+    total += decoded.byteLength;
+    chunks.push(decoded);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+function buildWavHeader(pcm: Uint8Array): Uint8Array {
+  const header = new Uint8Array(44);
+  const view = new DataView(header.buffer);
+  const ascii = (offset: number, text: string) => {
+    for (let index = 0; index < text.length; index += 1) {
+      view.setUint8(offset + index, text.charCodeAt(index));
+    }
+  };
+  ascii(0, "RIFF");
+  view.setUint32(4, 36 + pcm.byteLength, true);
+  ascii(8, "WAVE");
+  ascii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, GEMINI_PCM_SAMPLE_RATE, true);
+  view.setUint32(28, GEMINI_PCM_SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, "data");
+  view.setUint32(40, pcm.byteLength, true);
+  return header;
 }
 
 function invalidProviderResponse(
@@ -1442,6 +1889,8 @@ interface SanitizedProviderError {
     | "configuration"
     | "responses"
     | "speech"
+    | "gemini_speech"
+    | "gemini_stage_tags"
     | "files.create"
     | "files.delete";
   status: number | null;
