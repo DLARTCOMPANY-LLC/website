@@ -42,6 +42,9 @@ const MAX_STAGE_NOTE_BYTES = 4_000;
 const MAX_GEMINI_PCM_BYTES = 32 * 1024 * 1024;
 const MAX_GEMINI_TTS_RESPONSE_BYTES = 48 * 1024 * 1024;
 const MAX_GEMINI_LLM_RESPONSE_BYTES = 64 * 1024;
+const MAX_SPEECH_BATCH_REQUEST_BYTES = 96 * 1024;
+const MAX_SPEECH_BATCH_LINES = 12;
+const SPEECH_BATCH_CONCURRENCY = 4;
 
 export const OPENAI_SPEECH_VOICES = [
   "alloy",
@@ -136,9 +139,11 @@ export async function handleRequest(
   const route =
     pathname === "/v1/screenplays/import"
       ? "screenplay_import"
-      : pathname === "/v1/audio/speech"
-        ? "speech"
-        : null;
+      : pathname === "/v1/audio/speech/batch"
+        ? "speech_batch"
+        : pathname === "/v1/audio/speech"
+          ? "speech"
+          : null;
 
   if (request.method === "OPTIONS") {
     return cors.allowed
@@ -162,7 +167,7 @@ export async function handleRequest(
   if (!cors.allowed) {
     return errorResponse(403, "origin_not_allowed", "Origin is not allowed", requestId);
   }
-  if (route === "speech" && isGeminiSpeechEnabled(env)) {
+  if ((route === "speech" || route === "speech_batch") && isGeminiSpeechEnabled(env)) {
     if (!env.GEMINI_API_KEY?.trim()) {
       return withCors(
         errorResponse(
@@ -202,7 +207,11 @@ export async function handleRequest(
 
   const contentLength = parseContentLength(request.headers.get("content-length"));
   const requestLimit =
-    route === "screenplay_import" ? MAX_REQUEST_BYTES : MAX_SPEECH_REQUEST_BYTES;
+    route === "screenplay_import"
+      ? MAX_REQUEST_BYTES
+      : route === "speech_batch"
+        ? MAX_SPEECH_BATCH_REQUEST_BYTES
+        : MAX_SPEECH_REQUEST_BYTES;
   if (contentLength !== null && contentLength > requestLimit) {
     return withCors(
       errorResponse(
@@ -210,12 +219,49 @@ export async function handleRequest(
         "request_too_large",
         route === "screenplay_import"
           ? "Request body exceeds 10 MiB"
-          : "Request body exceeds 16 KiB",
+          : route === "speech_batch"
+            ? "Request body exceeds 96 KiB"
+            : "Request body exceeds 16 KiB",
         requestId,
       ),
       cors,
     );
   }
+
+  // The batch body is validated before the rate limit: the durable limiter
+  // charges a batch as lines.length requests, and an invalid batch must not
+  // consume budget.
+  let validatedBatch: ValidatedSpeechBatch | null = null;
+  if (route === "speech_batch") {
+    let value: unknown;
+    try {
+      const body = await readBodyWithLimit(request, MAX_SPEECH_BATCH_REQUEST_BYTES);
+      value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+    } catch (error) {
+      const tooLarge = error instanceof RequestTooLargeError;
+      return withCors(
+        errorResponse(
+          tooLarge ? 413 : 400,
+          tooLarge ? "request_too_large" : "invalid_json",
+          tooLarge ? "Request body exceeds 96 KiB" : "Request body must be valid JSON",
+          requestId,
+        ),
+        cors,
+      );
+    }
+    try {
+      validatedBatch = validateSpeechBatchRequest(value);
+    } catch (error) {
+      if (error instanceof ClientInputError) {
+        return withCors(
+          errorResponse(error.status, error.code, error.message, requestId),
+          cors,
+        );
+      }
+      throw error;
+    }
+  }
+  const rateLimitQuantity = validatedBatch ? validatedBatch.lines.length : 1;
 
   const rateLimit = positiveInteger(env.RATE_LIMIT_REQUESTS, 10, 1, 60);
   const globalRateLimit = positiveInteger(env.GLOBAL_RATE_LIMIT_REQUESTS, 100, 1, 10_000);
@@ -228,6 +274,7 @@ export async function handleRequest(
       rateLimit,
       globalRateLimit,
       windowSeconds,
+      rateLimitQuantity,
     );
   } catch {
     return withCors(
@@ -272,14 +319,23 @@ export async function handleRequest(
           fetchImplementation,
           providerErrorLogger,
         )
-      : await processSpeech(
-          request,
-          env,
-          requestId,
-          cors,
-          fetchImplementation,
-          providerErrorLogger,
-        );
+      : route === "speech_batch" && validatedBatch
+        ? await processSpeechBatch(
+            validatedBatch,
+            env,
+            requestId,
+            cors,
+            fetchImplementation,
+            providerErrorLogger,
+          )
+        : await processSpeech(
+            request,
+            env,
+            requestId,
+            cors,
+            fetchImplementation,
+            providerErrorLogger,
+          );
   } finally {
     activeOpenAiRequests -= 1;
   }
@@ -299,6 +355,7 @@ export function evaluateRateWindows(
   clientLimit: number,
   windowMs: number,
   now: number,
+  quantity: number = 1,
 ): RateWindowEvaluation {
   const nextGlobal =
     !globalWindow || globalWindow.resetAt <= now
@@ -309,8 +366,8 @@ export function evaluateRateWindows(
       ? { count: 0, resetAt: now + windowMs }
       : clientWindow;
   const blockedUntil = Math.max(
-    nextGlobal.count >= globalLimit ? nextGlobal.resetAt : now,
-    nextClient.count >= clientLimit ? nextClient.resetAt : now,
+    nextGlobal.count + quantity > globalLimit ? nextGlobal.resetAt : now,
+    nextClient.count + quantity > clientLimit ? nextClient.resetAt : now,
   );
 
   if (blockedUntil > now) {
@@ -325,8 +382,8 @@ export function evaluateRateWindows(
   return {
     allowed: true,
     retryAfterSeconds: 0,
-    globalWindow: { ...nextGlobal, count: nextGlobal.count + 1 },
-    clientWindow: { ...nextClient, count: nextClient.count + 1 },
+    globalWindow: { ...nextGlobal, count: nextGlobal.count + quantity },
+    clientWindow: { ...nextClient, count: nextClient.count + quantity },
   };
 }
 
@@ -361,7 +418,15 @@ export class RateLimiter {
       request.headers.get("X-Window-Ms"),
       3_600_000,
     );
-    if (!clientKey || !/^[a-f0-9]{64}$/.test(clientKey) || !clientLimit || !globalLimit || !windowMs) {
+    const quantity = parseRateQuantity(request.headers.get("X-Quantity"));
+    if (
+      !clientKey ||
+      !/^[a-f0-9]{64}$/.test(clientKey) ||
+      !clientLimit ||
+      !globalLimit ||
+      !windowMs ||
+      quantity === null
+    ) {
       return new Response(null, { status: 400 });
     }
 
@@ -400,6 +465,7 @@ async function takeDurableRateLimit(
   clientLimit: number,
   globalLimit: number,
   windowSeconds: number,
+  quantity: number = 1,
 ): Promise<RateLimitDecision> {
   if (!env.RATE_LIMITER) throw new Error("RATE_LIMITER binding is unavailable");
 
@@ -412,6 +478,7 @@ async function takeDurableRateLimit(
       "X-Client-Limit": String(clientLimit),
       "X-Global-Limit": String(globalLimit),
       "X-Window-Ms": String(windowSeconds * 1_000),
+      "X-Quantity": String(quantity),
     },
   });
   if (!response.ok) throw new Error("Durable rate limiter rejected the request");
@@ -464,6 +531,15 @@ function parseInternalPositiveInteger(value: string | null, maximum: number): nu
   if (!value || !/^\d+$/.test(value)) return null;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= maximum ? parsed : null;
+}
+
+// Absent (legacy caller) or "1" mean a single request. Out-of-range values
+// fail closed so a malformed quantity can never charge an unlimited budget.
+function parseRateQuantity(value: string | null): number | null {
+  if (value === null || value === "" || value === "1") return 1;
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return parsed >= 1 && parsed <= MAX_SPEECH_BATCH_LINES ? parsed : null;
 }
 
 async function processImport(
@@ -678,51 +754,198 @@ async function processSpeech(
     );
   }
 
-  try {
-    const result = geminiEnabled
-      ? await synthesizeGeminiSpeech(
-          speechRequest,
-          env,
-          fetchImplementation,
-          providerErrorLogger,
-          requestId,
-        )
-      : await synthesizeSpeech(speechRequest, model, env, fetchImplementation);
+  const outcome = await synthesizeSpeechLine(
+    { text: speechRequest.text, stageNote: speechRequest.stageNote },
+    speechRequest.voice,
+    { geminiEnabled, model, env, fetchImplementation, providerErrorLogger, requestId },
+  );
+  if (!outcome.ok) {
     return withCors(
-      new Response(result.audio, {
-        status: 200,
-        headers: {
-          "Cache-Control": "no-store, private",
-          "Content-Length": String(result.audio.byteLength),
-          "Content-Type": result.contentType,
-          "X-Content-Type-Options": "nosniff",
-          "X-Request-Id": requestId,
-          "X-Speech-Model": result.model,
-          "X-Speech-Voice": result.voice,
-        },
-      }),
-      cors,
-    );
-  } catch (error) {
-    if (error instanceof OpenAiTimeoutError) {
-      return withCors(
-        errorResponse(504, "upstream_timeout", "Speech generation timed out", requestId),
-        cors,
-      );
-    }
-    if (error instanceof OpenAiError) {
-      providerErrorLogger(requestId, error);
-      const publicError = classifyOpenAiError(error, "speech");
-      return withCors(
-        errorResponse(502, publicError.code, publicError.message, requestId),
-        cors,
-      );
-    }
-    return withCors(
-      errorResponse(500, "internal_error", "Speech generation failed", requestId),
+      errorResponse(outcome.status, outcome.code, outcome.message, requestId),
       cors,
     );
   }
+  return withCors(
+    new Response(outcome.audio, {
+      status: 200,
+      headers: {
+        "Cache-Control": "no-store, private",
+        "Content-Length": String(outcome.audio.byteLength),
+        "Content-Type": outcome.contentType,
+        "X-Content-Type-Options": "nosniff",
+        "X-Request-Id": requestId,
+        "X-Speech-Model": outcome.model,
+        "X-Speech-Voice": outcome.voice,
+      },
+    }),
+    cors,
+  );
+}
+
+interface SpeechLineInput {
+  text: string;
+  stageNote: string | null;
+}
+
+type SpeechLineOutcome =
+  | { ok: true; audio: ArrayBuffer; contentType: string; model: string; voice: SpeechVoice }
+  | { ok: false; status: number; code: string; message: string };
+
+// Shared per-line speech path used by both the single-line and batch
+// endpoints: provider selection, synthesis (including Gemini stage-note
+// resolution), byte caps, and error mapping are identical to the single
+// endpoint, so the single endpoint's behavior is unchanged.
+async function synthesizeSpeechLine(
+  line: SpeechLineInput,
+  voice: SpeechVoice,
+  options: {
+    geminiEnabled: boolean;
+    model: string;
+    env: Env;
+    fetchImplementation: typeof fetch;
+    providerErrorLogger: typeof logProviderError;
+    requestId: string;
+  },
+): Promise<SpeechLineOutcome> {
+  const request: ValidatedSpeechRequest = { text: line.text, voice, stageNote: line.stageNote };
+  try {
+    const result = options.geminiEnabled
+      ? await synthesizeGeminiSpeech(
+          request,
+          options.env,
+          options.fetchImplementation,
+          options.providerErrorLogger,
+          options.requestId,
+        )
+      : await synthesizeSpeech(request, options.model, options.env, options.fetchImplementation);
+    return {
+      ok: true,
+      audio: result.audio,
+      contentType: result.contentType,
+      model: result.model,
+      voice: result.voice,
+    };
+  } catch (error) {
+    if (error instanceof OpenAiTimeoutError) {
+      return {
+        ok: false,
+        status: 504,
+        code: "upstream_timeout",
+        message: "Speech generation timed out",
+      };
+    }
+    if (error instanceof OpenAiError) {
+      options.providerErrorLogger(options.requestId, error);
+      const publicError = classifyOpenAiError(error, "speech");
+      return {
+        ok: false,
+        status: 502,
+        code: publicError.code,
+        message: publicError.message,
+      };
+    }
+    return {
+      ok: false,
+      status: 500,
+      code: "internal_error",
+      message: "Speech generation failed",
+    };
+  }
+}
+
+interface ValidatedSpeechBatch {
+  voice: SpeechVoice;
+  lines: SpeechLineInput[];
+}
+
+// Batch endpoint: runs every validated line through the shared per-line
+// helper with a bounded concurrency pool. One failed line never fails the
+// batch — results stay in input order with per-line codes.
+async function processSpeechBatch(
+  batch: ValidatedSpeechBatch,
+  env: Env,
+  requestId: string,
+  cors: ReturnType<typeof resolveCors>,
+  fetchImplementation: typeof fetch,
+  providerErrorLogger: typeof logProviderError,
+): Promise<Response> {
+  const geminiEnabled = isGeminiSpeechEnabled(env);
+  const model = geminiEnabled ? "" : env.OPENAI_SPEECH_MODEL?.trim() || DEFAULT_SPEECH_MODEL;
+  if (!geminiEnabled && !OPENAI_SPEECH_MODELS.has(model)) {
+    return withCors(
+      errorResponse(
+        503,
+        "service_not_configured",
+        "Configured OpenAI speech model is unsupported",
+        requestId,
+      ),
+      cors,
+    );
+  }
+  if (
+    !geminiEnabled &&
+    (model === "tts-1" || model === "tts-1-hd") &&
+    !LEGACY_SPEECH_VOICES.has(batch.voice)
+  ) {
+    return withCors(
+      errorResponse(
+        400,
+        "invalid_voice",
+        "voice is not supported by the configured speech model",
+        requestId,
+      ),
+      cors,
+    );
+  }
+
+  const lines = batch.lines;
+  const results = new Array<
+    | { index: number; ok: true; contentType: string; audioB64: string }
+    | { index: number; ok: false; code: string }
+  >(lines.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next++;
+      if (index >= lines.length) return;
+      const outcome = await synthesizeSpeechLine(lines[index], batch.voice, {
+        geminiEnabled,
+        model,
+        env,
+        fetchImplementation,
+        providerErrorLogger,
+        requestId,
+      });
+      results[index] = outcome.ok
+        ? {
+            index,
+            ok: true,
+            contentType: outcome.contentType,
+            audioB64: toBase64(new Uint8Array(outcome.audio)),
+          }
+        : { index, ok: false, code: outcome.code };
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(SPEECH_BATCH_CONCURRENCY, lines.length) }, () => worker()),
+  );
+
+  return withCors(
+    jsonResponse(
+      200,
+      { voice: batch.voice, results },
+      {
+        "Cache-Control": "no-store, private",
+        "X-Content-Type-Options": "nosniff",
+        "X-Request-Id": requestId,
+        "X-Speech-Model": geminiEnabled
+          ? env.GEMINI_SPEECH_MODEL?.trim() || DEFAULT_GEMINI_SPEECH_MODEL
+          : model,
+        "X-Speech-Voice": batch.voice,
+      },
+    ),
+    cors,
+  );
 }
 
 function validateSpeechRequest(value: unknown): ValidatedSpeechRequest {
@@ -744,7 +967,16 @@ function validateSpeechRequest(value: unknown): ValidatedSpeechRequest {
     throw new ClientInputError(400, "invalid_voice", "voice must be a string");
   }
 
-  const text = record.text;
+  const text = validateSpeechTextContent(record.text);
+  if (!(OPENAI_SPEECH_VOICES as readonly string[]).includes(record.voice)) {
+    throw new ClientInputError(400, "invalid_voice", "voice is not supported");
+  }
+  const stageNote = validateSpeechStageNote(record.stageNote);
+  return { text, voice: record.voice as SpeechVoice, stageNote };
+}
+
+// Shared speech-text checks (identical for the single and batch endpoints).
+function validateSpeechTextContent(text: string): string {
   if (!text || text.trim() !== text) {
     throw new ClientInputError(
       400,
@@ -775,27 +1007,73 @@ function validateSpeechRequest(value: unknown): ValidatedSpeechRequest {
       "UTF-8 text exceeds 8 KiB",
     );
   }
+  return text;
+}
+
+// Shared stage-note checks: whitespace-only is treated as absent and the
+// size check only runs for non-empty notes.
+function validateSpeechStageNote(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string") {
+    throw new ClientInputError(400, "invalid_stage_note", "stageNote must be a string");
+  }
+  if (value.trim() === "") return null;
+  if (new TextEncoder().encode(value).byteLength > MAX_STAGE_NOTE_BYTES) {
+    throw new ClientInputError(
+      413,
+      "stage_note_too_large",
+      `stageNote exceeds ${MAX_STAGE_NOTE_BYTES} UTF-8 bytes`,
+    );
+  }
+  return value;
+}
+
+function validateSpeechLine(index: number, value: unknown): SpeechLineInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ClientInputError(400, "invalid_line", `lines[${index}] must be a JSON object`);
+  }
+  const record = value as Record<string, unknown>;
+  const unexpected = Object.keys(record).find((key) => key !== "text" && key !== "stageNote");
+  if (unexpected) {
+    throw new ClientInputError(400, "unexpected_field", `Unexpected JSON field: ${unexpected}`);
+  }
+  if (typeof record.text !== "string") {
+    throw new ClientInputError(400, "invalid_text", "text must be a string");
+  }
+  const text = validateSpeechTextContent(record.text);
+  return { text, stageNote: validateSpeechStageNote(record.stageNote) };
+}
+
+function validateSpeechBatchRequest(value: unknown): ValidatedSpeechBatch {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ClientInputError(400, "invalid_request", "Request body must be a JSON object");
+  }
+  const record = value as Record<string, unknown>;
+  const unexpected = Object.keys(record).find((key) => key !== "voice" && key !== "lines");
+  if (unexpected) {
+    throw new ClientInputError(400, "unexpected_field", `Unexpected JSON field: ${unexpected}`);
+  }
+  if (typeof record.voice !== "string") {
+    throw new ClientInputError(400, "invalid_voice", "voice must be a string");
+  }
   if (!(OPENAI_SPEECH_VOICES as readonly string[]).includes(record.voice)) {
     throw new ClientInputError(400, "invalid_voice", "voice is not supported");
   }
-  let stageNote: string | null = null;
-  if (record.stageNote !== undefined) {
-    if (typeof record.stageNote !== "string") {
-      throw new ClientInputError(400, "invalid_stage_note", "stageNote must be a string");
-    }
-    if (record.stageNote.trim() === "") {
-      stageNote = null;
-    } else if (new TextEncoder().encode(record.stageNote).byteLength > MAX_STAGE_NOTE_BYTES) {
-      throw new ClientInputError(
-        413,
-        "stage_note_too_large",
-        `stageNote exceeds ${MAX_STAGE_NOTE_BYTES} UTF-8 bytes`,
-      );
-    } else {
-      stageNote = record.stageNote;
-    }
+  if (!Array.isArray(record.lines)) {
+    throw new ClientInputError(400, "invalid_lines", "lines must contain 1 to 12 entries");
   }
-  return { text, voice: record.voice as SpeechVoice, stageNote };
+  if (record.lines.length === 0) {
+    throw new ClientInputError(400, "invalid_lines", "lines must contain 1 to 12 entries");
+  }
+  if (record.lines.length > MAX_SPEECH_BATCH_LINES) {
+    throw new ClientInputError(
+      400,
+      "too_many_lines",
+      `lines must contain at most ${MAX_SPEECH_BATCH_LINES} entries`,
+    );
+  }
+  const lines = record.lines.map((entry, index) => validateSpeechLine(index, entry));
+  return { voice: record.voice as SpeechVoice, lines };
 }
 
 async function synthesizeSpeech(
