@@ -151,6 +151,71 @@ failed validation); the request does not fail. On the OpenAI path, `stageNote` i
 Errors use the same JSON shape as screenplay import. Provider authentication, quota, and model
 availability remain safely distinguishable without exposing provider response text.
 
+### Batch speech
+
+`POST /v1/audio/speech/batch`
+
+Pre-warms several script lines in one request. Send `application/json`:
+
+```json
+{
+  "voice": "marin",
+  "lines": [
+    { "text": "Privacy-safe rehearsal line one.", "stageNote": "quietly" },
+    { "text": "Privacy-safe rehearsal line two." }
+  ]
+}
+```
+
+| Field | Type | Limits |
+| --- | --- | --- |
+| `voice` | String | One allowlisted preset voice (same allowlist as the single endpoint) |
+| `lines` | Array | Required, 1 to 12 entries. Each entry is an object with the same `text` and `stageNote` fields, limits, and validation as the single endpoint |
+
+The batch request body is limited to 96 KiB (the single endpoint keeps its 16 KiB cap). An unknown
+voice, unknown fields (top-level or per-line), and per-line `text`/`stageNote` violations are
+rejected before provider access with the same stable error codes as the single endpoint
+(`invalid_voice`, `unexpected_field`, `invalid_text`, `text_too_long`, `text_too_large`,
+`invalid_stage_note`, `stage_note_too_large`). A missing or empty `lines` array is `400
+invalid_lines`; more than 12 entries is `400 too_many_lines`; a body over the cap is `413
+request_too_large`.
+
+Once validation passes, the response is `200` JSON with one result per line, in input order,
+regardless of per-line provider outcomes:
+
+```json
+{
+  "voice": "marin",
+  "results": [
+    {
+      "index": 0,
+      "ok": true,
+      "contentType": "audio/wav",
+      "audioB64": "<base64 of the exact bytes the single endpoint would return>"
+    },
+    { "index": 1, "ok": false, "code": "upstream_error" }
+  ]
+}
+```
+
+- `audioB64` is the base64 encoding of the same bytes the single endpoint would return for that
+  line (`audio/wav` on the Gemini path, `audio/aac` on the OpenAI path).
+- `code` uses the same provider error codes as the single endpoint (`upstream_error`,
+  `upstream_timeout`, `provider_auth_error`, `provider_quota_exceeded`,
+  `provider_model_unavailable`, `internal_error`). One failed line never fails the batch: the batch
+  stays `200` and the other lines keep their own results.
+- Lines run through a bounded pool of 4 concurrent lines, each under the same per-line provider
+  timeout (`GEMINI_SPEECH_TIMEOUT_MS` on the Gemini path). Twelve lines are at most 3 sequential
+  waves, so worst-case wall time is 3 times the per-line timeout (180 s at the 60 s maximum;
+  90 s at the 30 s production value) — comfortably within the Workers request duration limit.
+- Provider selection, stage-note behavior, the success headers (`Cache-Control: no-store,
+  private`, `X-Content-Type-Options: nosniff`, `X-Request-Id`, `X-Speech-Model`,
+  `X-Speech-Voice`), and the privacy and logging rules apply exactly as on the single endpoint.
+- A batch counts as `lines.length` requests against both rate-limit budgets (per-IP and global),
+  exactly like N single requests would. A batch that would exceed the budget receives the standard
+  `429 rate_limited` shape and consumes nothing; validation, size, and content-type rejections also
+  consume nothing.
+
 ## Privacy and cost controls
 
 - The Worker does not persist uploads, extracted screenplay, dialogue sent for speech, or generated
@@ -169,13 +234,15 @@ availability remain safely distinguishable without exposing provider response te
   Cloudflare invocation metadata can still include timestamps, status codes, and request metadata.
 - `OPENAI_API_KEY` exists only as a Worker secret. Never ship it or a shared API secret in
   LineReader.
-- One upload or speech utterance, byte/character limits, a configurable output-token ceiling,
-  upstream timeouts, and an isolate-local concurrency ceiling bound each request's cost.
+- One upload or one to twelve speech lines (batch), byte/character limits, a configurable
+  output-token ceiling, upstream timeouts, and an isolate-local concurrency ceiling bound each
+  request's cost.
 - A SQLite-backed Cloudflare Durable Object atomically enforces both the configurable per-IP budget
   (`RATE_LIMIT_REQUESTS`) and a global budget (`GLOBAL_RATE_LIMIT_REQUESTS`) in each
   `RATE_LIMIT_WINDOW_SECONDS` window. All edge locations coordinate through one named object.
   Expired client records are deleted, and client IP addresses are SHA-256 hashed before entering
-  durable storage. The endpoint fails closed without a healthy `RATE_LIMITER` binding.
+  durable storage. A speech batch charges `lines.length` against both budgets, exactly like N
+  single requests would. The endpoint fails closed without a healthy `RATE_LIMITER` binding.
 - Native clients generally omit `Origin` and are accepted. There is deliberately no embedded shared
   app secret because a public mobile binary cannot keep one confidential. Durable per-IP/global
   budgets are the server-enforced abuse and billing boundary. Browser requests are accepted only when
@@ -212,7 +279,7 @@ Gemini speech variables (all optional; OpenAI remains the default when
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GEMINI_SPEECH_ENABLED` | `false` | Routes `/v1/audio/speech` to Gemini TTS when `"true"` |
+| `GEMINI_SPEECH_ENABLED` | `false` | Routes `/v1/audio/speech` and `/v1/audio/speech/batch` to Gemini TTS when `"true"` |
 | `GEMINI_SPEECH_MODEL` | `gemini-3.1-flash-tts-preview` | Gemini TTS model id |
 | `GEMINI_LLM_MODEL` | `gemini-3.1-flash` | Gemini model used to turn a `stageNote` into tags |
 | `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | Gemini API base URL |
@@ -274,5 +341,6 @@ the same way in reverse (set the var back to `"false"` and redeploy); no data mi
 and the OpenAI path resumes immediately.
 
 Production currently uses `https://dlartcompany-screenplay-api.dlartcompany.workers.dev`. LineReader
-uses `/v1/screenplays/import` for OpenAI OCR and `/v1/audio/speech` for speech. A dedicated
-API hostname can replace the `workers.dev` hostname later without changing either route contract.
+uses `/v1/screenplays/import` for OpenAI OCR and `/v1/audio/speech` (or `/v1/audio/speech/batch`
+for up to twelve lines at once) for speech. A dedicated API hostname can replace the `workers.dev`
+hostname later without changing either route contract.
